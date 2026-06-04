@@ -1,0 +1,25 @@
+# Maven target directory
+target/
+pom.properties
+dependency-reduced-pom.xml
+
+# IDEs
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.vscode/
+.DS_Store
+
+# Compilation artifacts
+*.class
+*.jar
+*.so
+*.dylib
+*.dll
+*.h
+
+# Docker/Build cache
+.docker-cache/
+docker-output/
