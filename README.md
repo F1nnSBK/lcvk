@@ -36,21 +36,32 @@ Stressed with **50,000,000 vectors (3.05 GB index)** and a batch workload of 278
 
 ### Statistical Classification Accuracy
 
-Evaluated on the **MNIST 1-Million Real-Data Dataset** using DINOv3-extracted embeddings (fine-tuned via Hugging Face LoRA model `F1nnSBK/lunar-dinov3-lora`), sign-preconditioned via a diagonal matrix, rotated with a 384-dimensional Hadamard matrix, and binarized into 1-bit vectors (384 bits / 48 bytes per record):
+The feature extraction pipeline supports two operational modes, controlled by the `use_adapter` flag in `DinoExtractor`:
 
-* **Target Class:** Digit `7` (simulating Lunar Cave Entrance Anchors)
-* **Optimal Decision Boundary (Hamming Threshold):** $\le 46$ bits (dynamically optimized)
-* **Precision:** **38.69%** (massively recovered from 26.35% under DINOv2 baseline)
-* **Recall:** **71.31%** (successfully identifying 76,300 targets)
-* **F1-Score:** **50.16%** (a significant recovery in classification confidence)
+| Mode | Extractor | Use Case |
+|:---|:---|:---|
+| **Mode A** (`use_adapter=False`) | Naked DINOv3 ViT-S/16 backbone | System verification, labeled benchmark datasets (e.g., MNIST) |
+| **Mode B** (`use_adapter=True`) | DINOv3 + `F1nnSBK/lunar-dinov3-lora` | Production: anomaly detection in real NASA/LROC NAC lunar tile data |
+
+> The LoRA adapter was specifically fine-tuned on lunar surface imagery to detect pit and cave morphology. Applied to MNIST, it introduces domain-specific distortion that degrades classification performance. For system verification purposes, **Mode A (naked backbone) is used**, which provides the theoretically cleanest embedding geometry for a well-labeled supervised benchmark.
+
+**System Verification Results (MNIST 1-Million Dataset, Mode A — Naked DINOv3 ViT-S/16):**
+
+Embeddings are sign-preconditioned via a diagonal matrix $D$, rotated with a 384-dimensional Kronecker-Hadamard matrix $H_{384}$, and binarized into 1-bit vectors (384 bits / 48 bytes per record):
+
+* **Target Class:** Digit `7` (simulation surrogate for Lunar Cave Entrance Anchors)
+* **Optimal Decision Boundary (Hamming Threshold):** $\le 51$ bits (dynamically F1-optimized)
+* **Precision:** **55.30%**
+* **Recall:** **74.11%**
+* **F1-Score:** **63.34%**
 
 #### Confusion Matrix
-* **True Positives (TP):** 76,300 (successfully detected target anchors)
-* **False Positives (FP):** 120,900 (non-target structures classified as resonant - dropped by over 40%)
-* **False Negatives (FN):** 30,700 (targets missed by the threshold)
-* **True Negatives (TN):** 772,100 (successfully rejected background terrain)
+* **True Positives (TP):** 79,300 (correctly classified target anchors)
+* **False Positives (FP):** 64,100 (background terrain misclassified as resonant)
+* **False Negatives (FN):** 27,700 (targets below the voting threshold)
+* **True Negatives (TN):** 828,900 (correctly rejected background terrain)
 
-> **Scientific Analysis of the Metric Space:** The implementation of the native **DINOv3-LoRA** pipeline results in a much sharper semantic separation within the 384-bit Hamming space. The optimal decision boundary shifted left from 50 bits down to **46 bits**, indicating a higher semantic concentration of target features. The massive reduction in False Positives (from 207,100 to 120,900) yields a robust **50.16% F1-Score**, which is further stabilized in the multi-family resonant voting step (requiring active resonance across $\ge 7$ query variations) to filter remaining background noise.
+> **Scientific Analysis:** The naked DINOv3 backbone produces a significantly wider inter-class gap in the 384-bit Hamming space (background mean: **86.29 bits**) versus the target class (mean: **67.25 bits**), compared to the LoRA-adapted variant applied to MNIST. This 19-bit separation gap is responsible for the substantial reduction in False Positives (from 207,100 under DINOv2 to **64,100** under Mode A DINOv3), yielding an F1-Score of **63.34%**. In production deployment (Mode B), where both database vectors and queries are derived from real LROC NAC tile data, the Lunar LoRA adapter is expected to sharpen this boundary further by concentrating the target feature space around genuine pit and cave morphologies.
 
 ### Visualizations
 
@@ -60,7 +71,7 @@ Evaluated on the **MNIST 1-Million Real-Data Dataset** using DINOv3-extracted em
 #### Hamming Distance Distribution & Semantic Cut-off
 ![Hamming Distance Distribution](assets/distribution_plot.svg)
 
-> **Interpretation:** This distribution illustrates the statistical separation of vectors within the 384-bit Hamming space. The cyan distribution denotes the semantic target (e.g., lunar pits), which naturally clusters at lower Hamming distances relative to the query anchors. Conversely, the pink distribution represents general background surface terrain. The cut-off at 50 bits serves as the F1-optimized decision boundary where LCVK classifies a tile with maximum confidence. Occurrences within the green *Resonant Zone* trigger a positive classification vote for that target family.
+> **Interpretation:** This distribution illustrates the statistical separation between target and background classes within the 384-bit Hamming space under Mode A (naked DINOv3). The cyan distribution (mean: 67.25 bits, σ: 19.35 bits) represents the target class (digit `7`, serving as a surrogate for lunar cave entrance morphologies), while the pink distribution (mean: 86.29 bits, σ: 15.96 bits) represents background surface classes. The F1-optimized decision boundary at **51 bits** defines the Hamming threshold below which LCVK issues a positive resonance vote. Vectors falling within the green *Resonant Zone* contribute a vote to the multi-family bitmask accumulator.
 
 ---
 

@@ -29,8 +29,8 @@ def create_distribution_plot():
     
     # Mathematical representation of real-data distribution from run_real_verification.py
     # Target 7s vs Non-7s (Other digits)
-    mu_target, std_target = 66.44, 20.62
-    mu_other, std_other = 78.04, 17.45
+    mu_target, std_target = 67.25, 19.35
+    mu_other, std_other = 86.29, 15.96
     
     x = np.linspace(20, 140, 1000)
     
@@ -46,8 +46,8 @@ def create_distribution_plot():
     ax.fill_between(x, 0, y_other, color=COLOR_NAIVE, alpha=0.12)
     
     # Highlight optimal threshold at 50 bits
-    threshold = 46
-    ax.axvline(x=threshold, color='#00f5a0', linestyle='--', linewidth=2, alpha=0.9, label='Optimal Threshold (46 bits)')
+    threshold = 51
+    ax.axvline(x=threshold, color='#00f5a0', linestyle='--', linewidth=2, alpha=0.9, label='Optimal Threshold (51 bits, F1-optimized)')
     
     # Fill resonant region (True Positives area)
     x_resonant = np.linspace(20, threshold, 500)
@@ -70,9 +70,9 @@ def create_distribution_plot():
     ax.legend(facecolor=PANEL_BG, edgecolor=BORDER_COLOR, loc='upper right', fontsize=10)
     
     # Annotation for the threshold
-    ax.annotate('Quantization Cut-off\n(F1-Optimized)', 
+    ax.annotate('Quantization Cut-off\n(F1-Optimized @ 51 bits)', 
                 xy=(threshold, 0.005), 
-                xytext=(threshold - 25, 0.012),
+                xytext=(threshold - 28, 0.013),
                 arrowprops=dict(arrowstyle="->", color='#00f5a0', lw=1.5),
                 color='#f0f6fc', fontsize=10, fontweight='bold', bbox=dict(boxstyle="round,pad=0.5", fc=PANEL_BG, ec=BORDER_COLOR, alpha=0.9))
 

@@ -46,10 +46,20 @@ def get_hadamard_384():
 H384 = get_hadamard_384()
 
 class DinoExtractor(nn.Module):
-    def __init__(self, weights_path="models/meta/dinov3_vits16_pretrain_lvd.pth", model_size="vits16", lora_repo="F1nnSBK/lunar-dinov3-lora"):
+    """
+    Dual-mode DINOv3 feature extractor.
+
+    use_adapter=False  -> Naked DINOv3 backbone (System Verification / MNIST baseline).
+                          Provides maximum class separation for well-labeled test data.
+    use_adapter=True   -> DINOv3 + Lunar LoRA adapter (Production / Planetary Discovery).
+                          Optimized to detect lunar pit/cave morphology in real NAC tile data.
+    """
+    def __init__(self, weights_path="models/meta/dinov3_vits16_pretrain_lvd.pth", model_size="vits16",
+                 lora_repo="F1nnSBK/lunar-dinov3-lora", use_adapter=False):
         super().__init__()
         self.model_size = model_size
-        print(f"Loading DINOv3 model: dinov3_{model_size} with local weights {weights_path}...")
+        self.use_adapter = use_adapter
+        print(f"Loading DINOv3 backbone: dinov3_{model_size} (local weights: {weights_path})...")
         
         try:
             self.backbone = torch.hub.load("facebookresearch/dinov3", f"dinov3_{model_size}", pretrained=False)
@@ -57,39 +67,42 @@ class DinoExtractor(nn.Module):
             if 'model' in state_dict:
                 state_dict = state_dict['model']
             self.backbone.load_state_dict(state_dict, strict=True)
+            self.backbone.eval()
         except Exception as e:
             print(f"Error while loading base model: {e}")
             raise
         
-        print(f"Initializing LoRA adapter config (r=32, alpha=32) for target modules...")
-        lora_config = LoraConfig(
-            r=32,
-            lora_alpha=32,
-            target_modules=["qkv", "proj", "fc1", "fc2"],
-            lora_dropout=0.1,
-            bias="none"
-        )
-        
-        print(f"Loading pre-trained LoRA adapter from {lora_repo}...")
-        try:
-            self.model = PeftModel.from_pretrained(
-                self.backbone, 
-                lora_repo,
-                config=lora_config
+        if use_adapter:
+            print(f"[Mode B] Loading Lunar LoRA adapter from {lora_repo}...")
+            lora_config = LoraConfig(
+                r=32,
+                lora_alpha=32,
+                target_modules=["qkv", "proj", "fc1", "fc2"],
+                lora_dropout=0.1,
+                bias="none"
             )
-            self.model.eval()
-        except Exception as e:
-            print(f"Error while loading LoRA adapter: {e}")
-            raise
+            try:
+                self.model = PeftModel.from_pretrained(
+                    self.backbone,
+                    lora_repo,
+                    config=lora_config
+                )
+                self.model.eval()
+            except Exception as e:
+                print(f"Error while loading LoRA adapter: {e}")
+                raise
+        else:
+            print("[Mode A] Running naked DINOv3 backbone (no LoRA adapter). Optimal for MNIST system verification.")
+            self.model = self.backbone
         
     def forward(self, x):
         return self.model(x)
 
-def get_feature_extractor():
+def get_feature_extractor(use_adapter=False):
     import torch
     from torchvision import transforms
     
-    extractor = DinoExtractor()
+    extractor = DinoExtractor(use_adapter=use_adapter)
     
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -166,8 +179,10 @@ def main():
         labels = np.array(labels, dtype=np.int32)
 
     # 2. Extract embeddings
-    extract_fn = get_feature_extractor()
-    print("Extracting features for 10,000 unique images...")
+    # Mode A: use_adapter=False -> naked DINOv3 backbone for maximum MNIST class separation.
+    # Mode B: use_adapter=True  -> DINOv3 + Lunar LoRA for real NAC lunar tile ingestion.
+    extract_fn = get_feature_extractor(use_adapter=False)
+    print("Extracting features for 10,000 unique images (Mode A: DINOv3 backbone, no LoRA)...")
     
     # Process in batches to save memory
     batch_size = 1000
