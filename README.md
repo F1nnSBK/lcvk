@@ -195,16 +195,25 @@ int graal_tear_down_isolate(graal_isolatethead_t* thread);
 
 ## References
 
-1. **PolarQuant (Mathematical Foundations for Random Preconditioning):**
-   * Han, I., Kacham, P., Mirrokni, V., Karbasi, A., & Zandieh, A. (2025). *PolarQuant: Quantizing KV Caches with Polar Transformation*. arXiv preprint arXiv:2502.02617.
-2. **QJL (1-Bit Quantized JL Transform):**
-   * Zandieh, A., Daliri, M., & Han, I. (2024). *QJL: 1-bit Quantized JL Transform for KV Cache Quantization with Zero Overhead*.
-3. **FAISS (High-Performance Similarity Search Baseline):**
-   * Johnson, J., Douze, M., & Jégou, H. (2019). *Billion-scale similarity search with GPUs*. IEEE Transactions on Big Data, 7(3), 535-547.
-4. **DINOv2 / DINOv3 (Upstream Vision Foundation Models):**
-   * Oquab, M., et al. (2023). *DINOv2: Learning Robust Visual Features without Supervision*. arXiv preprint arXiv:2304.07193.
-5. **LMAX Disruptor (Lock-Free Thread Ring Buffer Architecture):**
-   * Thompson, M., Farley, D., Barker, M., Gee, A., & Stewart, D. (2011). *Disruptor: High performance alternative to bounded queues for exchanging data between concurrent threads*. LMAX Technical Paper.
+1. Han, I., Kacham, P., Mirrokni, V., Karbasi, A., & Zandieh, A. (2025). PolarQuant: Quantizing KV caches with polar transformation. *arXiv*. https://arxiv.org/abs/2502.02617
+
+   > *Theoretical foundation for LCVK's PolarQuant-Hadamard preconditioning step. The diagonal sign-randomization matrix D and Kronecker-Hadamard rotation H₃₄ before 1-bit quantization are derived directly from the polar transformation framework introduced here.*
+
+2. Zandieh, A., Daliri, M., & Han, I. (2024). QJL: 1-bit quantized JL transform for KV cache quantization with zero overhead. *arXiv*. https://arxiv.org/abs/2406.00read
+
+   > *Mathematical grounding for the Johnson-Lindenstrauss-inspired 1-bit projection used throughout the LCVK quantization pipeline. Proves that sign-random projections preserve inner-product geometry under Hamming-distance retrieval with near-zero computational overhead.*
+
+3. Johnson, J., Douze, M., & Jégou, H. (2021). Billion-scale similarity search with GPUs. *IEEE Transactions on Big Data*, *7*(3), 535-547. https://doi.org/10.1109/TBDATA.2019.2921572
+
+   > *Primary performance baseline. FAISS GPU indices are the current industry standard for large-scale approximate nearest-neighbor search. LCVK targets equivalent recall at lower memory bandwidth cost via a lock-free POPCNT scan on CPU-only hosts.*
+
+4. Oquab, M., Darcet, T., Moutakanni, T., Vo, H., Szafraniec, M., Khalidov, V., Fernandez, P., Haziza, D., Massa, F., El-Nouby, A., Assran, M., Ballas, N., Gallusser, L., Hannun, A., Rabinovich, A., Singh, M., & Bojanowski, P. (2023). DINOv2: Learning robust visual features without supervision. *arXiv*. https://arxiv.org/abs/2304.07193
+
+   > *Upstream vision foundation model architecture. LCVK uses a DINOv3 ViT-S/16 backbone (successor architecture) for feature extraction. In Mode A (system verification on labeled benchmarks such as MNIST), the naked backbone is used for unbiased class separation. In Mode B (production), the backbone is paired with the domain-specific Lunar LoRA adapter (F1nnSBK/lunar-dinov3-lora) fine-tuned on LROC NAC lunar surface imagery.*
+
+5. Thompson, M., Farley, D., Barker, M., Gee, A., & Stewart, D. (2011). *Disruptor: High performance alternative to bounded queues for exchanging data between concurrent threads* [Technical report]. LMAX. https://lmax-exchange.github.io/disruptor/disruptor.html
+
+   > *Architectural inspiration for LCVK's inter-thread data pipeline. The Disruptor's ring-buffer design, cache-line padding for false-sharing avoidance, and single-writer principle directly inform the lock-free query dispatch and result-accumulation mechanisms in the LCVK Java runtime.*
 
 ---
 
