@@ -1,0 +1,284 @@
+import os
+import sys
+import struct
+import numpy as np
+from PIL import Image
+
+# Configuration
+NUM_RECORDS = 1_000_000
+DIMENSION = 384
+BYTES_PER_RECORD = 64
+DB_FILE = "lunar_real_data.bin"
+
+# Fixed seed for reproducibility
+np.random.seed(42)
+
+# Generate sign matrix D and H384
+D = np.random.choice([-1, 1], size=DIMENSION).astype(np.float32)
+
+def get_hadamard_384():
+    def silvester_hadamard(n):
+        if n == 1:
+            return np.array([[1]])
+        H_prev = silvester_hadamard(n // 2)
+        return np.block([[H_prev, H_prev], [H_prev, -H_prev]])
+        
+    H32 = silvester_hadamard(32)
+    H12 = np.array([
+        [1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1],
+        [1, -1,  1, -1,  1,  1,  1, -1, -1, -1,  1, -1],
+        [1, -1, -1,  1, -1,  1,  1,  1, -1, -1, -1,  1],
+        [1,  1, -1, -1,  1, -1,  1,  1,  1, -1, -1, -1],
+        [1, -1,  1, -1, -1,  1, -1,  1,  1,  1, -1, -1],
+        [1, -1, -1,  1, -1, -1,  1, -1,  1,  1,  1, -1],
+        [1, -1, -1, -1,  1, -1, -1,  1, -1,  1,  1,  1],
+        [1,  1, -1, -1, -1,  1, -1, -1,  1, -1,  1,  1],
+        [1,  1,  1, -1, -1, -1,  1, -1, -1,  1, -1,  1],
+        [1,  1,  1,  1, -1, -1, -1,  1, -1, -1,  1, -1],
+        [1, -1,  1,  1,  1, -1, -1, -1,  1, -1, -1,  1],
+        [1,  1, -1,  1,  1,  1, -1, -1, -1,  1, -1, -1]
+    ])
+    return np.kron(H12, H32).astype(np.float32)
+
+H384 = get_hadamard_384()
+
+def get_feature_extractor():
+    try:
+        import torch
+        from peft import PeftModel
+        
+        print("Attempting to load DINOv3 with LoRA adapter as per model card...")
+        # 1. Initialize base DINOv3 ViT-S/16 backbone from PyTorch Hub
+        base_model = torch.hub.load("facebookresearch/dinov3", "dinov3_vits16", pretrained=False)
+        
+        # 2. Load local pre-trained base weights if available
+        weights_path = "models/meta/dinov3/dinov3_vits16_pretrain_lvd.pth"
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"Local base weights not found at '{weights_path}'")
+            
+        state_dict = torch.load(weights_path, map_location="cpu")
+        if "model" in state_dict:
+            state_dict = state_dict["model"]
+        base_model.load_state_dict(state_dict, strict=True)
+        
+        # 3. Load the LoRA adapter from Hugging Face
+        model = PeftModel.from_pretrained(
+            base_model, 
+            "F1nnSBK/lunar-dinov3-lora", 
+            adapter_name="pit_adapter"
+        )
+        model.eval()
+        
+        from torchvision import transforms
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        def extract(images):
+            batch = torch.stack([transform(img.convert("RGB")) for img in images])
+            with torch.no_grad():
+                embeddings = model(batch)
+            return embeddings.cpu().numpy()
+            
+        print("DINOv3 LoRA model loaded successfully via PyTorch Hub and PEFT!")
+        return extract
+    except Exception as e:
+        print(f"Failed to load DINOv3 LoRA: {e}. Trying Hugging Face PeftModel fallback...")
+        try:
+            from transformers import AutoImageProcessor, AutoModel
+            from peft import PeftModel
+            import torch
+            
+            model_id = "F1nnSBK/lunar-dinov3-lora"
+            print(f"Attempting to load LoRA model '{model_id}' from Hugging Face...")
+            # Try loading configuration
+            from peft import PeftConfig
+            config = PeftConfig.from_pretrained(model_id)
+            print(f"Loading base model: {config.base_model_name_or_path}")
+            base_model = AutoModel.from_pretrained(config.base_model_name_or_path)
+            model = PeftModel.from_pretrained(base_model, model_id)
+            processor = AutoImageProcessor.from_pretrained(config.base_model_name_or_path)
+            model.eval()
+            
+            def extract(images):
+                inputs = processor(images=images, return_tensors="pt")
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+                    embeddings = outputs.pooler_output
+                else:
+                    embeddings = outputs[0][:, 0]
+                return embeddings.cpu().numpy()
+                
+            print("LoRA Model loaded successfully.")
+            return extract
+        except Exception as e_hf:
+            print(f"Failed to load LoRA model via Hugging Face config: {e_hf}. Falling back to standard DINOv2...")
+        try:
+            from transformers import AutoImageProcessor, AutoModel
+            import torch
+            
+            base_model_id = "facebook/dinov2-small"
+            processor = AutoImageProcessor.from_pretrained(base_model_id)
+            model = AutoModel.from_pretrained(base_model_id)
+            model.eval()
+            
+            def extract(images):
+                inputs = processor(images=images, return_tensors="pt")
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+                    embeddings = outputs.pooler_output
+                else:
+                    embeddings = outputs[0][:, 0]
+                return embeddings.cpu().numpy()
+                
+            print("Standard DINOv2-small loaded successfully.")
+            return extract
+        except Exception as e2:
+            print(f"Failed to load standard DINOv2: {e2}. Falling back to random projection mock extractor...")
+            
+            # Deterministic projection from 28x28 grayscale image pixels to 384 dimensions
+            np.random.seed(42)
+            proj = np.random.randn(28*28, DIMENSION).astype(np.float32)
+            # Orthonormalize projection matrix for better quality
+            q, _ = np.linalg.qr(proj)
+            
+            def extract(images):
+                features = []
+                for img in images:
+                    img_arr = np.array(img.convert("L").resize((28, 28))).flatten() / 255.0
+                    feat = np.dot(img_arr, q)
+                    features.append(feat)
+                return np.array(features, dtype=np.float32)
+                
+            print("Mock projection extractor configured.")
+            return extract
+
+def precondition_and_quantize(embeddings):
+    # L2-normalize
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    embeddings_norm = embeddings / norms
+    
+    # Apply diagonal sign preconditioning
+    embeddings_sign = embeddings_norm * D
+    
+    # Apply Hadamard transformation H384 / sqrt(384)
+    embeddings_precond = np.dot(embeddings_sign, H384.T) / np.sqrt(DIMENSION)
+    
+    # 1-bit quantization (val >= 0 -> 1, val < 0 -> 0)
+    bits = (embeddings_precond >= 0).astype(np.uint8)
+    return bits
+
+def pack_bits(bits_array):
+    # bits_array shape: (N, 384)
+    # Output byte array: (N, 48)
+    n = bits_array.shape[0]
+    packed = np.zeros((n, 48), dtype=np.uint8)
+    for i in range(48):
+        byte_slice = bits_array[:, i*8 : (i+1)*8]
+        val = np.zeros(n, dtype=np.uint8)
+        for b in range(8):
+            val = (val << 1) | byte_slice[:, b]
+        packed[:, i] = val
+    return packed
+
+def main():
+    # 1. Load dataset (MNIST via torchvision)
+    print("Loading MNIST dataset for real-data verification...")
+    try:
+        from torchvision import datasets
+        train_dataset = datasets.MNIST(root='./data', train=True, download=True)
+        images = [train_dataset[i][0] for i in range(10000)]
+        labels = np.array([train_dataset[i][1] for i in range(10000)], dtype=np.int32)
+    except Exception as e:
+        print(f"Failed to load MNIST via torchvision: {e}. Generating synthetic digits...")
+        # Create synthetic images if offline/failed
+        images = []
+        labels = []
+        for i in range(10000):
+            # Create a 28x28 mock digit image (circle/lines based on index)
+            img = Image.new("L", (28, 28), 0)
+            digit = i % 10
+            # Draw something simple depending on digit
+            from PIL import ImageDraw
+            draw = ImageDraw.Draw(img)
+            if digit == 7:
+                draw.line([(5, 5), (23, 5)], fill=255, width=3)
+                draw.line([(23, 5), (10, 23)], fill=255, width=3)
+            elif digit == 1:
+                draw.line([(14, 5), (14, 23)], fill=255, width=3)
+            else:
+                draw.ellipse([(5, 5), (23, 23)], outline=255, width=2)
+            images.append(img)
+            labels.append(digit)
+        labels = np.array(labels, dtype=np.int32)
+
+    # 2. Extract embeddings
+    extract_fn = get_feature_extractor()
+    print("Extracting features for 10,000 unique images...")
+    
+    # Process in batches to save memory
+    batch_size = 1000
+    embeddings_list = []
+    for idx in range(0, len(images), batch_size):
+        batch_imgs = images[idx : idx + batch_size]
+        batch_embs = extract_fn(batch_imgs)
+        embeddings_list.append(batch_embs)
+    embeddings = np.vstack(embeddings_list)
+    print(f"Features extracted. Shape: {embeddings.shape}")
+    
+    # 3. Apply PolarQuant-Hadamard preconditioning & quantization
+    print("Applying PolarQuant-Hadamard preconditioning & 1-bit quantization...")
+    bits = precondition_and_quantize(embeddings)
+    packed_vectors = pack_bits(bits)
+    
+    # 4. Replicate to 1,000,000 records
+    print(f"Replicating to {NUM_RECORDS:,} records...")
+    tile_indices = np.arange(NUM_RECORDS)
+    source_indices = tile_indices % 10000
+    
+    # Sequential Z-order Z-IDs and packed vectors
+    db_packed_vectors = packed_vectors[source_indices]
+    db_labels = labels[source_indices]
+    
+    # 5. Write the PLAN binary file
+    print(f"Writing binary index to {DB_FILE}...")
+    magic = b"PLAN"
+    planet_id = 1  # Moon
+    header_data = struct.pack("<BQQ", planet_id, NUM_RECORDS, 1737400)
+    padding = b"\x00" * 43
+    header = magic + header_data + padding
+    assert len(header) == 64
+    
+    # Build 64-byte records
+    records = np.zeros((NUM_RECORDS, BYTES_PER_RECORD), dtype=np.uint8)
+    
+    # Bytes 0-7: Sequential tileId (long)
+    ids = np.arange(NUM_RECORDS, dtype=np.uint64)
+    records[:, 0:8] = ids.view(np.uint8).reshape(-1, 8)
+    
+    # Bytes 8-55: Packed vector (48 bytes)
+    records[:, 8:56] = db_packed_vectors
+    
+    # Bytes 56-63: Metadata padding (8 bytes) containing the label (for easy verification)
+    metadata = db_labels.astype(np.uint64)
+    records[:, 56:64] = metadata.view(np.uint8).reshape(-1, 8)
+    
+    with open(DB_FILE, "wb") as f:
+        f.write(header)
+        f.write(records.tobytes())
+        
+    print(f"Database successfully generated: {DB_FILE}")
+    
+    # Save target metadata for the verification phase
+    np.save("db_labels.npy", db_labels)
+    # Save the raw embeddings subset of '7's for query generation
+    sevens_indices = np.where(labels == 7)[0]
+    np.save("raw_sevens.npy", embeddings[sevens_indices])
+
+if __name__ == "__main__":
+    main()

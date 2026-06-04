@@ -50,7 +50,29 @@ public class VectorDb {
      * Unregisters an index.
      */
     public boolean dropIndex(String name) {
-        return indices.remove(name) != null;
+        Index index = indices.remove(name);
+        if (index != null) {
+            try {
+                index.close();
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+        return index != null;
+    }
+
+    /**
+     * Closes the database coordinator and all loaded indices.
+     */
+    public void close() {
+        for (Index index : indices.values()) {
+            try {
+                index.close();
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+        indices.clear();
     }
 
     /**
@@ -78,7 +100,7 @@ public class VectorDb {
             }
         }
         long totalTiles = maxId + 1;
-        long totalBytes = 64 + totalTiles * 48L; // 64-byte header + totalTiles * 48 bytes
+        long totalBytes = 64 + totalTiles * 64L; // 64-byte header + totalTiles * 64 bytes
 
         try (FileChannel channel = FileChannel.open(filePath,
                 StandardOpenOption.CREATE,
@@ -101,11 +123,13 @@ public class VectorDb {
 
             // Write vector records into offsets dictated by their ID (Geographic ID mapping)
             for (VectorRecord record : records) {
-                long offset = 64 + record.id() * 48L;
+                long offset = 64 + record.id() * 64L;
+                mapped.set(ValueLayout.JAVA_LONG, offset, record.id());
                 long[] vector = record.vector();
                 for (int j = 0; j < 6; j++) {
-                    mapped.set(ValueLayout.JAVA_LONG, offset + (j * 8), vector[j]);
+                    mapped.set(ValueLayout.JAVA_LONG, offset + 8 + (j * 8), vector[j]);
                 }
+                mapped.set(ValueLayout.JAVA_LONG, offset + 56, record.metadata());
             }
             mapped.force(); // Commit changes to physical disk
         }

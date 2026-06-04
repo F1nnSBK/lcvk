@@ -21,6 +21,13 @@
     </properties>
 
     <dependencies>
+        <!-- LMAX Disruptor for lock-free parallel execution -->
+        <dependency>
+            <groupId>com.lmax</groupId>
+            <artifactId>disruptor</artifactId>
+            <version>3.4.4</version>
+        </dependency>
+
         <!-- GraalVM SDK for CEntryPoint and C API annotations -->
         <dependency>
             <groupId>org.graalvm.sdk</groupId>
@@ -95,6 +102,8 @@
                         <buildArg>-H:+VectorAPISupport</buildArg>
                         <buildArg>--parallelism=3</buildArg>
                         <buildArg>-J-Xmx5g</buildArg>
+                        <buildArg>-O3</buildArg>
+                        <buildArg>-march=native</buildArg>
                     </buildArgs>
                 </configuration>
             </plugin>

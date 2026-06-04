@@ -5,7 +5,7 @@ import java.util.List;
 /**
  * Interface representing a binary vector index.
  */
-public interface Index {
+public interface Index extends AutoCloseable {
     /**
      * Inserts a vector record into the index.
      * Note: For memory-mapped files, this might write to the file or throw if read-only.
@@ -65,4 +65,7 @@ public interface Index {
      * @param score the Hamming distance (lower is closer)
      */
     record SearchResult(long id, int score) {}
+
+    @Override
+    default void close() throws Exception {}
 }

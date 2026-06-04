@@ -221,4 +221,51 @@ public class CApi {
         String idxName = CTypeConversion.toJavaString(indexName);
         return db.dropIndex(idxName) ? 0 : -2;
     }
+
+    /**
+     * Set the Disruptor execution chunk size dynamically for the specified index.
+     *
+     * @param indexName Name of the index
+     * @param chunkSize Size of each parallel search chunk
+     * @return 0 on success, negative error code on failure
+     */
+    @CEntryPoint(name = "vdb_set_chunk_size")
+    public static int setChunkSize(IsolateThread thread, CCharPointer indexName, long chunkSize) {
+        if (db == null) {
+            return -1;
+        }
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            Index index = db.getIndex(idxName);
+            if (index == null) {
+                return -2;
+            }
+            if (index instanceof FlatIndex) {
+                ((FlatIndex) index).setChunkSize(chunkSize);
+                return 0;
+            }
+            return -3;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Schliesst die Datenbank und alle offenen Indizes, stoppt Hintergrund-Threads.
+     */
+    @CEntryPoint(name = "vdb_close")
+    public static int closeDb(IsolateThread thread) {
+        if (db != null) {
+            try {
+                db.close();
+                db = null;
+            } catch (Throwable t) {
+                t.printStackTrace();
+                return -4;
+            }
+        }
+        return 0;
+    }
 }
+

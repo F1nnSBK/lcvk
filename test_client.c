@@ -15,6 +15,8 @@ double get_elapsed_us(struct timespec start, struct timespec end) {
 }
 
 int main() {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     graal_isolate_t *isolate = NULL;
     graal_isolatethread_t *thread = NULL;
     struct timespec start, end;
@@ -160,7 +162,10 @@ int main() {
 
     free(voting_mask);
 
-    printf("\n[C Client] Tearing down GraalVM Isolate...\n");
+    printf("\n[C Client] Closing LCVK Database...\n");
+    vdb_close(thread);
+
+    printf("[C Client] Tearing down GraalVM Isolate...\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
     graal_tear_down_isolate(thread);
     clock_gettime(CLOCK_MONOTONIC, &end);

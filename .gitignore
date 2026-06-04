@@ -23,3 +23,20 @@ dependency-reduced-pom.xml
 # Docker/Build cache
 .docker-cache/
 docker-output/
+
+# Local GraalVM download
+graalvm/
+
+# Python bytecode and temporary data
+__pycache__/
+*.pyc
+data/
+
+# Binary databases and NumPy arrays
+*.bin
+*.npy
+
+# Build outputs
+build-output/
+
+

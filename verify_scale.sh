@@ -19,3 +19,8 @@ echo -e "\n${BLUE}=== LCVK: Running Scale Benchmark inside Docker ===${NC}"
 docker run --rm vectordb-verifier python3 benchmark.py
 
 echo -e "\n${GREEN}=== LCVK: Scale Stress-Test Completed Successfully ===${NC}"
+echo -e "Note: Running inside Docker virtualization has CPU-sharing limits on macOS."
+echo -e "To get absolute bare-metal performance, run LCVK natively on a Linux host:"
+echo -e "  1. Install Java 25 & GraalVM Native Image on host"
+echo -e "  2. Compile: mvn clean package"
+echo -e "  3. Run benchmark: python3 benchmark.py"

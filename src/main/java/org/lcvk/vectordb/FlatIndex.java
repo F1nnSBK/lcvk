@@ -10,25 +10,129 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadFactory;
 import java.util.stream.IntStream;
 
+import com.lmax.disruptor.RingBuffer;
+import com.lmax.disruptor.WorkHandler;
+import com.lmax.disruptor.YieldingWaitStrategy;
+import com.lmax.disruptor.dsl.Disruptor;
+import com.lmax.disruptor.dsl.ProducerType;
+
+import sun.misc.Unsafe;
+import java.lang.reflect.Field;
+
 /**
- * High-performance Flat Index using Project Panama (FFM) MemorySegments.
- * Maps a file directly off-heap to support multi-gigabyte vector files.
- * Streams records linearly and applies SIMD Hamming distance in a parallel Single-Pass Multi-Query Scan.
+ * Hardware-optimized Flat Index utilizing sun.misc.Unsafe for direct memory access
+ * and LMAX Disruptor for lock-free execution mapping.
  *
- * File Structure:
+ * File Structure (64-byte Cache-Line Aligned):
  * - 64-byte Header (Bytes 0-63)
- * - N * 48-byte pure flat vectors (6 longs / 384 bits each)
- * - Geographic ID is implicitly determined by the record index (0, 1, 2, ...)
+ * - N * 64-byte aligned records:
+ *   - Offset 0 (8 bytes): id (long)
+ *   - Offset 8 (48 bytes): vector data (6 longs / 384 bits)
+ *   - Offset 56 (8 bytes): metadata (long)
  */
 public class FlatIndex implements Index {
+
+    private static final Unsafe UNSAFE;
+    static {
+        try {
+            Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
+            theUnsafe.setAccessible(true);
+            UNSAFE = (Unsafe) theUnsafe.get(null);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to initialize sun.misc.Unsafe", e);
+        }
+    }
+
     private final MemorySegment segment;
     private final long size;
 
+    // Reusable, thread-safe Disruptor pool
+    private final Disruptor<RangeEvent> disruptor;
+    private final RingBuffer<RangeEvent> ringBuffer;
+    private final int numWorkers;
+    private volatile long chunkSize = 20000;
+
+    public void setChunkSize(long chunkSize) {
+        if (chunkSize <= 0) {
+            throw new IllegalArgumentException("Chunk size must be greater than zero");
+        }
+        this.chunkSize = chunkSize;
+    }
+
     /**
-     * Instantiates FlatIndex using an existing MemorySegment.
+     * Pojo capturing a segment block scanning event for the Disruptor.
      */
+    public static class RangeEvent {
+        public long startIdx;
+        public long endIdx;
+        public long[][] queries;
+        public int k;
+        public int[][][] threadLocalDists;
+        public long[][][] threadLocalIds;
+        public boolean isVoting;
+        public CountDownLatch latch;
+        
+        // Voting parameters
+        public int[] families;
+        public int[] thresholds;
+        public MemorySegment[] threadLocalMasks;
+
+        public void setKnn(long startIdx, long endIdx, long[][] queries, int k, 
+                           long[][][] threadLocalIds, int[][][] threadLocalDists, CountDownLatch latch) {
+            this.startIdx = startIdx;
+            this.endIdx = endIdx;
+            this.queries = queries;
+            this.k = k;
+            this.threadLocalIds = threadLocalIds;
+            this.threadLocalDists = threadLocalDists;
+            this.isVoting = false;
+            this.latch = latch;
+        }
+
+        public void setVoting(long startIdx, long endIdx, long[][] queries, int[] families, int[] thresholds, 
+                              MemorySegment[] threadLocalMasks, CountDownLatch latch) {
+            this.startIdx = startIdx;
+            this.endIdx = endIdx;
+            this.queries = queries;
+            this.families = families;
+            this.thresholds = thresholds;
+            this.threadLocalMasks = threadLocalMasks;
+            this.isVoting = true;
+            this.latch = latch;
+        }
+    }
+
+    /**
+     * WorkHandler assigning parallel range blocks dynamically to execution threads.
+     */
+    private static class RangeWorkHandler implements WorkHandler<RangeEvent> {
+        private final FlatIndex index;
+        private final int threadId;
+
+        public RangeWorkHandler(FlatIndex index, int threadId) {
+            this.index = index;
+            this.threadId = threadId;
+        }
+
+        @Override
+        public void onEvent(RangeEvent event) throws Exception {
+            try {
+                if (event.isVoting) {
+                    index.executeVotingRange(event.startIdx, event.endIdx, event.queries, event.families, event.thresholds, event.threadLocalMasks[threadId]);
+                } else {
+                    index.executeKnnRange(event.startIdx, event.endIdx, event.queries, event.k, 
+                                          event.threadLocalIds[threadId], event.threadLocalDists[threadId]);
+                }
+            } finally {
+                event.latch.countDown();
+            }
+        }
+    }
+
     public FlatIndex(MemorySegment segment) {
         if (segment == null) {
             throw new IllegalArgumentException("MemorySegment cannot be null");
@@ -37,19 +141,34 @@ public class FlatIndex implements Index {
         if (segment.byteSize() <= 64) {
             this.size = 0;
         } else {
-            // Header is 64 bytes, each vector is 48 bytes (6 longs)
-            this.size = (segment.byteSize() - 64) / 48;
+            // Header is 64 bytes, each record is 64 bytes
+            this.size = (segment.byteSize() - 64) / 64;
         }
+
+        this.numWorkers = Runtime.getRuntime().availableProcessors();
+        
+        ThreadFactory threadFactory = r -> {
+            Thread t = new Thread(r, "lcvk-disruptor-worker");
+            t.setDaemon(true);
+            return t;
+        };
+
+        this.disruptor = new Disruptor<>(
+                RangeEvent::new,
+                1024,
+                threadFactory,
+                ProducerType.SINGLE,
+                new YieldingWaitStrategy()
+        );
+
+        RangeWorkHandler[] handlers = new RangeWorkHandler[numWorkers];
+        for (int i = 0; i < numWorkers; i++) {
+            handlers[i] = new RangeWorkHandler(this, i);
+        }
+        this.disruptor.handleEventsWithWorkerPool(handlers);
+        this.ringBuffer = this.disruptor.start();
     }
 
-    /**
-     * Factory method to map a vector file directly to virtual memory.
-     * Enforces magic bytes PLAN validation.
-     *
-     * @param path path to the vector database file
-     * @return a mapped FlatIndex instance
-     * @throws IOException if mapping fails or magic bytes mismatch
-     */
     public static FlatIndex mapFile(String path) throws IOException {
         Path filePath = Path.of(path);
         try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
@@ -72,7 +191,7 @@ public class FlatIndex implements Index {
 
     @Override
     public void insert(VectorRecord record) {
-        throw new UnsupportedOperationException("Insert is not supported on a read-only memory-mapped Index. Compile files offline.");
+        throw new UnsupportedOperationException("Insert is not supported on read-only memory-mapped Index.");
     }
 
     @Override
@@ -93,82 +212,58 @@ public class FlatIndex implements Index {
             return empty;
         }
 
-        int numQueries = queries.length;
         long numRecords = this.size;
-
-        // Determine thread partitioning
-        int numThreads = Runtime.getRuntime().availableProcessors();
-        long recordsPerThread = numRecords / numThreads;
-        if (recordsPerThread == 0) {
-            numThreads = 1;
-            recordsPerThread = numRecords;
+        if (numRecords == 0) {
+            List<SearchResult>[] empty = new List[queries.length];
+            Arrays.fill(empty, List.of());
+            return empty;
         }
 
-        final int activeThreads = numThreads;
-        final long finalRecordsPerThread = recordsPerThread;
+        int numQueries = queries.length;
 
         // Allocate thread-local structures to hold top-K results
-        long[][][] threadLocalIds = new long[activeThreads][numQueries][k];
-        int[][][] threadLocalDists = new int[activeThreads][numQueries][k];
+        long[][][] threadLocalIds = new long[numWorkers][numQueries][k];
+        int[][][] threadLocalDists = new int[numWorkers][numQueries][k];
 
-        // Initialize distances to max value (infinity)
-        for (int t = 0; t < activeThreads; t++) {
+        // Initialize distances to infinity
+        for (int w = 0; w < numWorkers; w++) {
             for (int q = 0; q < numQueries; q++) {
-                Arrays.fill(threadLocalDists[t][q], Integer.MAX_VALUE);
+                Arrays.fill(threadLocalDists[w][q], Integer.MAX_VALUE);
             }
         }
 
-        // Parallel processing across thread chunks
-        IntStream.range(0, activeThreads).parallel().forEach(t -> {
-            long startIdx = t * finalRecordsPerThread;
-            long endIdx = (t == activeThreads - 1) ? numRecords : (t + 1) * finalRecordsPerThread;
+        // Divide work into lock-free chunk events
+        long currentChunkSize = this.chunkSize;
+        long numChunks = (numRecords + currentChunkSize - 1) / currentChunkSize;
+        CountDownLatch latch = new CountDownLatch((int) numChunks);
 
-            long[][] myIds = threadLocalIds[t];
-            int[][] myDists = threadLocalDists[t];
+        for (long c = 0; c < numChunks; c++) {
+            long startIdx = c * currentChunkSize;
+            long endIdx = Math.min(startIdx + currentChunkSize, numRecords);
 
-            // Allocate a reusable local buffer per thread to avoid garbage collection overhead
-            long[] tileVector = new long[6];
-
-            for (long i = startIdx; i < endIdx; i++) {
-                long vectorOffset = 64 + i * 48L; // 64-byte header + i * 48 bytes
-                long recordId = i; // Geographic ID is implicitly the tile index
-
-                // Load 6 longs directly from mapped MemorySegment into L1-cached local array
-                tileVector[0] = segment.get(ValueLayout.JAVA_LONG, vectorOffset);
-                tileVector[1] = segment.get(ValueLayout.JAVA_LONG, vectorOffset + 8);
-                tileVector[2] = segment.get(ValueLayout.JAVA_LONG, vectorOffset + 16);
-                tileVector[3] = segment.get(ValueLayout.JAVA_LONG, vectorOffset + 24);
-                tileVector[4] = segment.get(ValueLayout.JAVA_LONG, vectorOffset + 32);
-                tileVector[5] = segment.get(ValueLayout.JAVA_LONG, vectorOffset + 40);
-
-                // Single-Pass Scan: Stream queries against the loaded tile vector
-                for (int q = 0; q < numQueries; q++) {
-                    int dist = DistanceMetric.HAMMING.calculate(queries[q], tileVector);
-
-                    // Inline top-K accumulation (avoiding PriorityQueue object allocation)
-                    int[] dists = myDists[q];
-                    if (dist < dists[k - 1]) {
-                        long[] ids = myIds[q];
-                        int pos = k - 1;
-                        while (pos > 0 && dist < dists[pos - 1]) {
-                            dists[pos] = dists[pos - 1];
-                            ids[pos] = ids[pos - 1];
-                            pos--;
-                        }
-                        dists[pos] = dist;
-                        ids[pos] = recordId;
-                    }
-                }
+            long sequence = ringBuffer.next();
+            try {
+                RangeEvent event = ringBuffer.get(sequence);
+                event.setKnn(startIdx, endIdx, queries, k, threadLocalIds, threadLocalDists, latch);
+            } finally {
+                ringBuffer.publish(sequence);
             }
-        });
+        }
+
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Search execution was interrupted", e);
+        }
 
         // Merge thread-local results for each query
         List<SearchResult>[] finalResults = new List[numQueries];
         for (int q = 0; q < numQueries; q++) {
             List<SearchResult> merged = new ArrayList<>();
-            for (int t = 0; t < activeThreads; t++) {
-                long[] ids = threadLocalIds[t][q];
-                int[] dists = threadLocalDists[t][q];
+            for (int w = 0; w < numWorkers; w++) {
+                long[] ids = threadLocalIds[w][q];
+                int[] dists = threadLocalDists[w][q];
                 for (int i = 0; i < k; i++) {
                     if (dists[i] != Integer.MAX_VALUE) {
                         merged.add(new SearchResult(ids[i], dists[i]));
@@ -180,12 +275,12 @@ public class FlatIndex implements Index {
             merged.sort((r1, r2) -> {
                 int cmp = Integer.compare(r1.score(), r2.score());
                 if (cmp != 0) return cmp;
-                return Long.compare(r1.id(), r2.id()); // deterministic tie-breaker
+                return Long.compare(r1.id(), r2.id());
             });
 
             // Keep top K
             if (merged.size() > k) {
-                finalResults[q] = merged.subList(0, k);
+                finalResults[q] = new ArrayList<>(merged.subList(0, k));
             } else {
                 finalResults[q] = merged;
             }
@@ -194,65 +289,143 @@ public class FlatIndex implements Index {
         return finalResults;
     }
 
+    private void executeKnnRange(long startIdx, long endIdx, long[][] queries, int k, long[][] myIds, int[][] myDists) {
+        long baseAddr = segment.address();
+        int numQueries = queries.length;
+        long[] tileVector = new long[6];
+
+        for (long i = startIdx; i < endIdx; i++) {
+            // Offset calculation: (i + 1) * 64 bytes
+            long baseOffset = (i + 1) << 6;
+            
+            // Read 64-bit ID
+            long recordId = UNSAFE.getLong(baseAddr + baseOffset);
+
+            // Read 6 longs (384-bit vector) starting from offset 8
+            tileVector[0] = UNSAFE.getLong(baseAddr + baseOffset + 8);
+            tileVector[1] = UNSAFE.getLong(baseAddr + baseOffset + 16);
+            tileVector[2] = UNSAFE.getLong(baseAddr + baseOffset + 24);
+            tileVector[3] = UNSAFE.getLong(baseAddr + baseOffset + 32);
+            tileVector[4] = UNSAFE.getLong(baseAddr + baseOffset + 40);
+            tileVector[5] = UNSAFE.getLong(baseAddr + baseOffset + 48);
+
+            // Single-Pass Scan: Stream queries against loaded vector
+            for (int q = 0; q < numQueries; q++) {
+                int dist = DistanceMetric.HAMMING.calculate(queries[q], tileVector);
+
+                int[] dists = myDists[q];
+                if (dist < dists[k - 1]) {
+                    long[] ids = myIds[q];
+                    int pos = k - 1;
+                    while (pos > 0 && dist < dists[pos - 1]) {
+                        dists[pos] = dists[pos - 1];
+                        ids[pos] = ids[pos - 1];
+                        pos--;
+                    }
+                    dists[pos] = dist;
+                    ids[pos] = recordId;
+                }
+            }
+        }
+    }
+
     @Override
     public long queryPlanetaryGrid(long[][] queries, int[] families, int[] thresholds, MemorySegment votingMask) {
         if (queries == null || queries.length == 0) return 0;
         int numQueries = queries.length;
         long numRecords = this.size;
+        if (numRecords == 0) return 0;
 
+        long currentChunkSize = this.chunkSize;
+        long numChunks = (numRecords + currentChunkSize - 1) / currentChunkSize;
+        CountDownLatch latch = new CountDownLatch((int) numChunks);
+
+        // Allocate thread-local voting masks using Arena
+        Arena arena = Arena.global();
+        MemorySegment[] threadLocalMasks = new MemorySegment[numWorkers];
+        for (int w = 0; w < numWorkers; w++) {
+            threadLocalMasks[w] = arena.allocate(numRecords);
+        }
+
+        for (long c = 0; c < numChunks; c++) {
+            long startIdx = c * currentChunkSize;
+            long endIdx = Math.min(startIdx + currentChunkSize, numRecords);
+
+            long sequence = ringBuffer.next();
+            try {
+                RangeEvent event = ringBuffer.get(sequence);
+                event.setVoting(startIdx, endIdx, queries, families, thresholds, threadLocalMasks, latch);
+            } finally {
+                ringBuffer.publish(sequence);
+            }
+        }
+
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Voting execution was interrupted", e);
+        }
+
+        // Merge thread-local masks and count resonant tiles in parallel using Unsafe reads
+        long maskAddr = votingMask.address();
         int numThreads = Runtime.getRuntime().availableProcessors();
         long recordsPerThread = numRecords / numThreads;
         if (recordsPerThread == 0) {
             numThreads = 1;
             recordsPerThread = numRecords;
         }
-
         final int activeThreads = numThreads;
         final long finalRecordsPerThread = recordsPerThread;
 
-        // Perform parallel scan over disjoint sections of the voting mask
-        IntStream.range(0, activeThreads).parallel().forEach(t -> {
-            long startIdx = t * finalRecordsPerThread;
-            long endIdx = (t == activeThreads - 1) ? numRecords : (t + 1) * finalRecordsPerThread;
+        long[] localMaskAddrs = new long[numWorkers];
+        for (int w = 0; w < numWorkers; w++) {
+            localMaskAddrs[w] = threadLocalMasks[w].address();
+        }
 
-            long[] tileVector = new long[6];
-
-            for (long i = startIdx; i < endIdx; i++) {
-                long vectorOffset = 64 + i * 48L;
-
-                // Load vector (zero allocations)
-                tileVector[0] = segment.get(ValueLayout.JAVA_LONG, vectorOffset);
-                tileVector[1] = segment.get(ValueLayout.JAVA_LONG, vectorOffset + 8);
-                tileVector[2] = segment.get(ValueLayout.JAVA_LONG, vectorOffset + 16);
-                tileVector[3] = segment.get(ValueLayout.JAVA_LONG, vectorOffset + 24);
-                tileVector[4] = segment.get(ValueLayout.JAVA_LONG, vectorOffset + 32);
-                tileVector[5] = segment.get(ValueLayout.JAVA_LONG, vectorOffset + 40);
-
-                byte maskVal = 0;
-                for (int q = 0; q < numQueries; q++) {
-                    int dist = DistanceMetric.HAMMING.calculate(queries[q], tileVector);
-                    if (dist <= thresholds[q]) {
-                        maskVal |= (byte) (1 << families[q]);
-                    }
-                }
-                votingMask.set(ValueLayout.JAVA_BYTE, i, maskVal);
-            }
-        });
-
-        // Parallel reduction to count resonant tiles (>= 7 active bits set)
         return IntStream.range(0, activeThreads).parallel().mapToLong(t -> {
             long startIdx = t * finalRecordsPerThread;
             long endIdx = (t == activeThreads - 1) ? numRecords : (t + 1) * finalRecordsPerThread;
             long resonantCount = 0;
             for (long i = startIdx; i < endIdx; i++) {
-                byte val = votingMask.get(ValueLayout.JAVA_BYTE, i);
-                int bitsSet = Integer.bitCount(val & 0xFF);
-                if (bitsSet >= 7) {
+                byte mergedVal = 0;
+                for (int w = 0; w < numWorkers; w++) {
+                    mergedVal |= UNSAFE.getByte(localMaskAddrs[w] + i);
+                }
+                UNSAFE.putByte(maskAddr + i, mergedVal);
+                if (Integer.bitCount(mergedVal & 0xFF) >= 7) {
                     resonantCount++;
                 }
             }
             return resonantCount;
         }).sum();
+    }
+
+    private void executeVotingRange(long startIdx, long endIdx, long[][] queries, int[] families, int[] thresholds, MemorySegment localMask) {
+        long baseAddr = segment.address();
+        long localMaskAddr = localMask.address();
+        int numQueries = queries.length;
+        long[] tileVector = new long[6];
+
+        for (long i = startIdx; i < endIdx; i++) {
+            long baseOffset = (i + 1) << 6;
+
+            tileVector[0] = UNSAFE.getLong(baseAddr + baseOffset + 8);
+            tileVector[1] = UNSAFE.getLong(baseAddr + baseOffset + 16);
+            tileVector[2] = UNSAFE.getLong(baseAddr + baseOffset + 24);
+            tileVector[3] = UNSAFE.getLong(baseAddr + baseOffset + 32);
+            tileVector[4] = UNSAFE.getLong(baseAddr + baseOffset + 40);
+            tileVector[5] = UNSAFE.getLong(baseAddr + baseOffset + 48);
+
+            byte maskVal = 0;
+            for (int q = 0; q < numQueries; q++) {
+                int dist = DistanceMetric.HAMMING.calculate(queries[q], tileVector);
+                if (dist <= thresholds[q]) {
+                    maskVal |= (byte) (1 << families[q]);
+                }
+            }
+            UNSAFE.putByte(localMaskAddr + i, maskVal);
+        }
     }
 
     @Override
@@ -263,5 +436,16 @@ public class FlatIndex implements Index {
     @Override
     public long size() {
         return size;
+    }
+
+    @Override
+    public void close() {
+        if (disruptor != null) {
+            try {
+                disruptor.shutdown();
+            } catch (Throwable t) {
+                // ignore
+            }
+        }
     }
 }
