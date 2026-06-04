@@ -29,8 +29,8 @@ def create_distribution_plot():
     
     # Mathematical representation of real-data distribution from run_real_verification.py
     # Target 7s vs Non-7s (Other digits)
-    mu_target, std_target = 68.64, 17.25
-    mu_other, std_other = 79.14, 15.72
+    mu_target, std_target = 66.44, 20.62
+    mu_other, std_other = 78.04, 17.45
     
     x = np.linspace(20, 140, 1000)
     
@@ -46,8 +46,8 @@ def create_distribution_plot():
     ax.fill_between(x, 0, y_other, color=COLOR_NAIVE, alpha=0.12)
     
     # Highlight optimal threshold at 50 bits
-    threshold = 50
-    ax.axvline(x=threshold, color='#00f5a0', linestyle='--', linewidth=2, alpha=0.9, label='Optimal Threshold (50 bits)')
+    threshold = 46
+    ax.axvline(x=threshold, color='#00f5a0', linestyle='--', linewidth=2, alpha=0.9, label='Optimal Threshold (46 bits)')
     
     # Fill resonant region (True Positives area)
     x_resonant = np.linspace(20, threshold, 500)

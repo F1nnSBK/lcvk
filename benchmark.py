@@ -7,7 +7,7 @@ import struct
 import numpy as np
 
 # Configuration parameters for scale benchmark
-NUM_RECORDS = 50_000_000
+NUM_RECORDS = 10_000_000
 DIMENSION = 384
 BYTES_PER_RECORD = 64
 DB_FILE = "lunar_scale_test.bin"

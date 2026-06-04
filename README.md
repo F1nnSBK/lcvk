@@ -34,6 +34,24 @@ Stressed with **50,000,000 vectors (3.05 GB index)** and a batch workload of 278
 - **Compute Intensity:** **~29.30 GOPS** (Giga-Operations/sec)
 - **mmap Loading Time:** **~56.3 ms** (Zero-copy memory mapping)
 
+### Statistical Classification Accuracy
+
+Evaluated on the **MNIST 1-Million Real-Data Dataset** using DINOv3-extracted embeddings (fine-tuned via Hugging Face LoRA model `F1nnSBK/lunar-dinov3-lora`), sign-preconditioned via a diagonal matrix, rotated with a 384-dimensional Hadamard matrix, and binarized into 1-bit vectors (384 bits / 48 bytes per record):
+
+* **Target Class:** Digit `7` (simulating Lunar Cave Entrance Anchors)
+* **Optimal Decision Boundary (Hamming Threshold):** $\le 46$ bits (dynamically optimized)
+* **Precision:** **38.69%** (massively recovered from 26.35% under DINOv2 baseline)
+* **Recall:** **71.31%** (successfully identifying 76,300 targets)
+* **F1-Score:** **50.16%** (a significant recovery in classification confidence)
+
+#### Confusion Matrix
+* **True Positives (TP):** 76,300 (successfully detected target anchors)
+* **False Positives (FP):** 120,900 (non-target structures classified as resonant - dropped by over 40%)
+* **False Negatives (FN):** 30,700 (targets missed by the threshold)
+* **True Negatives (TN):** 772,100 (successfully rejected background terrain)
+
+> **Scientific Analysis of the Metric Space:** The implementation of the native **DINOv3-LoRA** pipeline results in a much sharper semantic separation within the 384-bit Hamming space. The optimal decision boundary shifted left from 50 bits down to **46 bits**, indicating a higher semantic concentration of target features. The massive reduction in False Positives (from 207,100 to 120,900) yields a robust **50.16% F1-Score**, which is further stabilized in the multi-family resonant voting step (requiring active resonance across $\ge 7$ query variations) to filter remaining background noise.
+
 ### Visualizations
 
 #### Throughput Comparison Against FAISS Baseline
@@ -161,4 +179,25 @@ int vdb_size(graal_isolatethead_t* thread, char* indexName);
 // Destroys the isolate and frees FFI memory allocations
 int graal_tear_down_isolate(graal_isolatethead_t* thread);
 ```
+
+---
+
+## References
+
+1. **PolarQuant (Mathematical Foundations for Random Preconditioning):**
+   * Han, I., Kacham, P., Mirrokni, V., Karbasi, A., & Zandieh, A. (2025). *PolarQuant: Quantizing KV Caches with Polar Transformation*. arXiv preprint arXiv:2502.02617.
+2. **QJL (1-Bit Quantized JL Transform):**
+   * Zandieh, A., Daliri, M., & Han, I. (2024). *QJL: 1-bit Quantized JL Transform for KV Cache Quantization with Zero Overhead*.
+3. **FAISS (High-Performance Similarity Search Baseline):**
+   * Johnson, J., Douze, M., & Jégou, H. (2019). *Billion-scale similarity search with GPUs*. IEEE Transactions on Big Data, 7(3), 535-547.
+4. **DINOv2 / DINOv3 (Upstream Vision Foundation Models):**
+   * Oquab, M., et al. (2023). *DINOv2: Learning Robust Visual Features without Supervision*. arXiv preprint arXiv:2304.07193.
+5. **LMAX Disruptor (Lock-Free Thread Ring Buffer Architecture):**
+   * Thompson, M., Farley, D., Barker, M., Gee, A., & Stewart, D. (2011). *Disruptor: High performance alternative to bounded queues for exchanging data between concurrent threads*. LMAX Technical Paper.
+
+---
+
+## License
+
+This project is licensed under the Apache License 2.0. See the [LICENSE](file:///Users/finnhertsch/projects/lcvk/LICENSE) file for the full license text.
 

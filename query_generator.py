@@ -1,5 +1,5 @@
 import numpy as np
-from ingest_pipeline import precondition_and_quantize, pack_bits, DIMENSION
+from ingest_pipeline import precondition_and_quantize, pack_bits, DIMENSION, DinoExtractor
 
 def main():
     # Load raw embeddings of sevens saved by ingest_pipeline.py
@@ -31,16 +31,15 @@ def main():
     families = np.arange(num_queries, dtype=np.int32) % 8
     
     # Set distance threshold for each family.
-    # A Hamming distance threshold of 110 (out of 384 bits) is a good balance:
-    # it allows for style variations in '7's while rejecting other digits (dist ~ 192).
-    thresholds = np.full(num_queries, 110, dtype=np.int32)
+    # For DINOv3-LoRA, the optimal Hamming threshold is expected to be under 50 bits.
+    thresholds = np.full(num_queries, 45, dtype=np.int32)
     
     # Save arrays for the verification phase
     np.save("queries.npy", queries_long)
     np.save("families.npy", families)
     np.save("thresholds.npy", thresholds)
     
-    print(f"Generated {num_queries} queries partitioned across 8 families.")
+    print(f"Generated {num_queries} queries partitioned across 8 families using DINOv3 pipeline.")
     print("Queries packed and saved successfully.")
 
 if __name__ == "__main__":

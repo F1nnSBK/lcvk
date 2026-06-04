@@ -104,7 +104,32 @@ def main():
     # 2. Run the actual native verification with the suggested threshold
     print(f"\nRe-running native verification with threshold = {best_threshold}...")
     
-    lib_path = "./target/lunar_core.dylib"
+    import platform
+    if platform.system() == "Darwin":
+        so_paths = [
+            "./target/lunar_core.dylib",
+            "./build-output/liblunar_core.dylib",
+            "./liblunar_core.dylib",
+            "./target/lunar_core.so",
+            "./build-output/liblunar_core.so",
+        ]
+    else:
+        so_paths = [
+            "./build-output/liblunar_core.so",
+            "./liblunar_core.so",
+            "./target/lunar_core.so",
+        ]
+    
+    lib_path = None
+    for p in so_paths:
+        if os.path.exists(p):
+            lib_path = p
+            break
+            
+    if not lib_path:
+        print("[Error] LCVK native library not found.")
+        sys.exit(1)
+        
     engine = LcvkEngine(lib_path)
     status = engine.load_index("lunar_real", DB_FILE)
     if status != 0:

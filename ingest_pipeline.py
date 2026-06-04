@@ -3,6 +3,9 @@ import sys
 import struct
 import numpy as np
 from PIL import Image
+import torch
+import torch.nn as nn
+from peft import LoraConfig, PeftModel
 
 # Configuration
 NUM_RECORDS = 1_000_000
@@ -42,120 +45,65 @@ def get_hadamard_384():
 
 H384 = get_hadamard_384()
 
-def get_feature_extractor():
-    try:
-        import torch
-        from peft import PeftModel
+class DinoExtractor(nn.Module):
+    def __init__(self, weights_path="models/meta/dinov3_vits16_pretrain_lvd.pth", model_size="vits16", lora_repo="F1nnSBK/lunar-dinov3-lora"):
+        super().__init__()
+        self.model_size = model_size
+        print(f"Loading DINOv3 model: dinov3_{model_size} with local weights {weights_path}...")
         
-        print("Attempting to load DINOv3 with LoRA adapter as per model card...")
-        # 1. Initialize base DINOv3 ViT-S/16 backbone from PyTorch Hub
-        base_model = torch.hub.load("facebookresearch/dinov3", "dinov3_vits16", pretrained=False)
+        try:
+            self.backbone = torch.hub.load("facebookresearch/dinov3", f"dinov3_{model_size}", pretrained=False)
+            state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
+            if 'model' in state_dict:
+                state_dict = state_dict['model']
+            self.backbone.load_state_dict(state_dict, strict=True)
+        except Exception as e:
+            print(f"Error while loading base model: {e}")
+            raise
         
-        # 2. Load local pre-trained base weights if available
-        weights_path = "models/meta/dinov3/dinov3_vits16_pretrain_lvd.pth"
-        if not os.path.exists(weights_path):
-            raise FileNotFoundError(f"Local base weights not found at '{weights_path}'")
-            
-        state_dict = torch.load(weights_path, map_location="cpu")
-        if "model" in state_dict:
-            state_dict = state_dict["model"]
-        base_model.load_state_dict(state_dict, strict=True)
-        
-        # 3. Load the LoRA adapter from Hugging Face
-        model = PeftModel.from_pretrained(
-            base_model, 
-            "F1nnSBK/lunar-dinov3-lora", 
-            adapter_name="pit_adapter"
+        print(f"Initializing LoRA adapter config (r=32, alpha=32) for target modules...")
+        lora_config = LoraConfig(
+            r=32,
+            lora_alpha=32,
+            target_modules=["qkv", "proj", "fc1", "fc2"],
+            lora_dropout=0.1,
+            bias="none"
         )
-        model.eval()
         
-        from torchvision import transforms
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        print(f"Loading pre-trained LoRA adapter from {lora_repo}...")
+        try:
+            self.model = PeftModel.from_pretrained(
+                self.backbone, 
+                lora_repo,
+                config=lora_config
+            )
+            self.model.eval()
+        except Exception as e:
+            print(f"Error while loading LoRA adapter: {e}")
+            raise
         
-        def extract(images):
-            batch = torch.stack([transform(img.convert("RGB")) for img in images])
-            with torch.no_grad():
-                embeddings = model(batch)
-            return embeddings.cpu().numpy()
-            
-        print("DINOv3 LoRA model loaded successfully via PyTorch Hub and PEFT!")
-        return extract
-    except Exception as e:
-        print(f"Failed to load DINOv3 LoRA: {e}. Trying Hugging Face PeftModel fallback...")
-        try:
-            from transformers import AutoImageProcessor, AutoModel
-            from peft import PeftModel
-            import torch
-            
-            model_id = "F1nnSBK/lunar-dinov3-lora"
-            print(f"Attempting to load LoRA model '{model_id}' from Hugging Face...")
-            # Try loading configuration
-            from peft import PeftConfig
-            config = PeftConfig.from_pretrained(model_id)
-            print(f"Loading base model: {config.base_model_name_or_path}")
-            base_model = AutoModel.from_pretrained(config.base_model_name_or_path)
-            model = PeftModel.from_pretrained(base_model, model_id)
-            processor = AutoImageProcessor.from_pretrained(config.base_model_name_or_path)
-            model.eval()
-            
-            def extract(images):
-                inputs = processor(images=images, return_tensors="pt")
-                with torch.no_grad():
-                    outputs = model(**inputs)
-                if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
-                    embeddings = outputs.pooler_output
-                else:
-                    embeddings = outputs[0][:, 0]
-                return embeddings.cpu().numpy()
-                
-            print("LoRA Model loaded successfully.")
-            return extract
-        except Exception as e_hf:
-            print(f"Failed to load LoRA model via Hugging Face config: {e_hf}. Falling back to standard DINOv2...")
-        try:
-            from transformers import AutoImageProcessor, AutoModel
-            import torch
-            
-            base_model_id = "facebook/dinov2-small"
-            processor = AutoImageProcessor.from_pretrained(base_model_id)
-            model = AutoModel.from_pretrained(base_model_id)
-            model.eval()
-            
-            def extract(images):
-                inputs = processor(images=images, return_tensors="pt")
-                with torch.no_grad():
-                    outputs = model(**inputs)
-                if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
-                    embeddings = outputs.pooler_output
-                else:
-                    embeddings = outputs[0][:, 0]
-                return embeddings.cpu().numpy()
-                
-            print("Standard DINOv2-small loaded successfully.")
-            return extract
-        except Exception as e2:
-            print(f"Failed to load standard DINOv2: {e2}. Falling back to random projection mock extractor...")
-            
-            # Deterministic projection from 28x28 grayscale image pixels to 384 dimensions
-            np.random.seed(42)
-            proj = np.random.randn(28*28, DIMENSION).astype(np.float32)
-            # Orthonormalize projection matrix for better quality
-            q, _ = np.linalg.qr(proj)
-            
-            def extract(images):
-                features = []
-                for img in images:
-                    img_arr = np.array(img.convert("L").resize((28, 28))).flatten() / 255.0
-                    feat = np.dot(img_arr, q)
-                    features.append(feat)
-                return np.array(features, dtype=np.float32)
-                
-            print("Mock projection extractor configured.")
-            return extract
+    def forward(self, x):
+        return self.model(x)
+
+def get_feature_extractor():
+    import torch
+    from torchvision import transforms
+    
+    extractor = DinoExtractor()
+    
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    def extract(images):
+        batch = torch.stack([transform(img.convert("RGB")) for img in images])
+        with torch.no_grad():
+            embeddings = extractor(batch)
+        return embeddings.cpu().numpy()
+        
+    return extract
 
 def precondition_and_quantize(embeddings):
     # L2-normalize
