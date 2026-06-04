@@ -2,12 +2,12 @@ package org.lcvk.vectordb;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.nio.ByteOrder;
 
 /**
  * Distance metric calculator.
  * Implements 384-bit binary vector Hamming distance.
- * Employs unrolled scalar Long.bitCount for maximum performance on small vectors (48 bytes).
+ * Employs unrolled scalar Long.bitCount for maximum performance on small
+ * vectors (48 bytes).
  */
 public enum DistanceMetric {
     HAMMING {
@@ -36,9 +36,10 @@ public enum DistanceMetric {
      * Zero-copy scalar calculation directly between an on-heap query vector
      * and a vector stored off-heap in a MemorySegment at the specified byte offset.
      *
-     * @param query       the on-heap query vector (6 longs)
-     * @param segment     the off-heap memory segment (file-mapped)
-     * @param byteOffset  the starting byte offset of the vector values in the segment
+     * @param query      the on-heap query vector (6 longs)
+     * @param segment    the off-heap memory segment (file-mapped)
+     * @param byteOffset the starting byte offset of the vector values in the
+     *                   segment
      * @return the Hamming distance
      */
     public static int calculateSegment(long[] query, MemorySegment segment, long byteOffset) {
