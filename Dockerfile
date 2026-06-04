@@ -55,9 +55,11 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install runtime dependencies for testing the C application
+# Install runtime dependencies for testing the C application and Python benchmarks
 RUN apt-get update && apt-get install -y \
     build-essential \
+    python3 \
+    python3-numpy \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -67,6 +69,7 @@ COPY --from=builder /build/target/lunar_core.so ./liblunar_core.so
 COPY --from=builder /build/target/lunar_core.h .
 COPY --from=builder /build/target/graal_isolate.h .
 COPY test_client.c .
+COPY benchmark.py .
 
 # Compile test client, linking it to our newly built liblunar_core.so
 RUN gcc -o test_client test_client.c -I. -L. -llunar_core -Wl,-rpath,.
