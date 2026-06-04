@@ -1,0 +1,10 @@
+numpy
+torch
+torchvision
+peft
+pillow
+rich
+torchmetrics
+timm
+matplotlib
+termcolor

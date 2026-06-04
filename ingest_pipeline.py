@@ -55,11 +55,14 @@ class DinoExtractor(nn.Module):
                           Optimized to detect lunar pit/cave morphology in real NAC tile data.
     """
     def __init__(self, weights_path="models/meta/dinov3_vits16_pretrain_lvd.pth", model_size="vits16",
-                 lora_repo="F1nnSBK/lunar-dinov3-lora", use_adapter=False):
+                 lora_repo="F1nnSBK/lunar-dinov3-lora", use_adapter=False, device=None):
         super().__init__()
         self.model_size = model_size
         self.use_adapter = use_adapter
-        print(f"Loading DINOv3 backbone: dinov3_{model_size} (local weights: {weights_path})...")
+        if device is None:
+            device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device)
+        print(f"Loading DINOv3 backbone: dinov3_{model_size} (local weights: {weights_path}) on {self.device}...")
         
         try:
             self.backbone = torch.hub.load("facebookresearch/dinov3", f"dinov3_{model_size}", pretrained=False)
@@ -67,6 +70,7 @@ class DinoExtractor(nn.Module):
             if 'model' in state_dict:
                 state_dict = state_dict['model']
             self.backbone.load_state_dict(state_dict, strict=True)
+            self.backbone.to(self.device)
             self.backbone.eval()
         except Exception as e:
             print(f"Error while loading base model: {e}")
@@ -87,22 +91,24 @@ class DinoExtractor(nn.Module):
                     lora_repo,
                     config=lora_config
                 )
+                self.model.to(self.device)
                 self.model.eval()
             except Exception as e:
                 print(f"Error while loading LoRA adapter: {e}")
                 raise
         else:
-            print("[Mode A] Running naked DINOv3 backbone (no LoRA adapter). Optimal for MNIST system verification.")
+            print(f"[Mode A] Running naked DINOv3 backbone (no LoRA adapter). Optimal for MNIST system verification on {self.device}.")
             self.model = self.backbone
         
     def forward(self, x):
-        return self.model(x)
+        return self.model(x.to(self.device))
 
 def get_feature_extractor(use_adapter=False):
     import torch
     from torchvision import transforms
     
-    extractor = DinoExtractor(use_adapter=use_adapter)
+    device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+    extractor = DinoExtractor(use_adapter=use_adapter, device=device)
     
     transform = transforms.Compose([
         transforms.Resize((224, 224)),

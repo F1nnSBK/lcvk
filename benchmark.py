@@ -4,6 +4,7 @@ import sys
 import time
 import ctypes
 import struct
+import argparse
 import numpy as np
 
 # Configuration parameters for scale benchmark
@@ -131,6 +132,56 @@ class LcvkEngine:
             self.thread = None
             self.isolate = None
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="LCVK Scale Benchmark")
+    parser.add_argument("--trace", action="store_true", help="Enable deep execution profiling with step-by-step timestamps")
+    return parser.parse_args()
+
+def format_duration(seconds: float) -> str:
+    if seconds >= 1.0:
+        return f"{seconds:.2f} s"
+    elif seconds >= 1e-3:
+        return f"{seconds * 1e3:.2f} ms"
+    else:
+        return f"{seconds * 1e6:.2f} µs"
+
+def print_performance_table(duration_p1: float, duration_p2: float, trace_data: dict = None):
+    total_time = duration_p1 + duration_p2
+    
+    col1_title = "Pipeline Stage / Operational Step"
+    col2_title = "Duration"
+    col3_title = "Budget %"
+    
+    w1 = 54
+    w2 = 13
+    w3 = 11
+    
+    print("\n" + " " * 20 + "Pipeline Performance Summary")
+    print(f"┌{'─' * w1}┬{'─' * w2}┬{'─' * w3}┐")
+    print(f"│ {col1_title:<{w1-2}} │ {col2_title:>{w2-2}} │ {col3_title:>{w3-2}} │")
+    print(f"├{'─' * w1}┼{'─' * w2}┼{'─' * w3}┤")
+    
+    def print_row(label, val, pct):
+        print(f"│ {label:<{w1-2}} │ {val:>{w2-2}} │ {pct:>{w3-2}} │")
+        
+    print_row("Phase 1: Scale Dataset Setup (Total)", format_duration(duration_p1), f"{(duration_p1/total_time)*100:5.1f}%")
+    if trace_data:
+        for k, v in trace_data.items():
+            if k.startswith("p1_"):
+                name = "  └─ " + k[3:].replace("_", " ").title()
+                print_row(name, format_duration(v), f"{(v/total_time)*100:5.1f}%")
+                
+    print_row("Phase 2: High-Performance Engine Operations (Total)", format_duration(duration_p2), f"{(duration_p2/total_time)*100:5.1f}%")
+    if trace_data:
+        for k, v in trace_data.items():
+            if k.startswith("p2_"):
+                name = "  └─ " + k[3:].replace("_", " ").title()
+                print_row(name, format_duration(v), f"{(v/total_time)*100:5.1f}%")
+                
+    print(f"├{'─' * w1}┼{'─' * w2}┼{'─' * w3}┤")
+    print_row("Total Pipeline Execution Time", format_duration(total_time), "100.0%")
+    print(f"└{'─' * w1}┴{'─' * w2}┴{'─' * w3}┘\n")
+
 def generate_lcvk_file(file_path: str, num_records: int):
     # Binary PLAN magic header structure (64-byte aligned)
     magic = b"PLAN"
@@ -163,12 +214,18 @@ def generate_lcvk_file(file_path: str, num_records: int):
         f.write(header)
         f.write(data.tobytes())
 
-def run_benchmark():
+def run_benchmark(trace_data=None):
+    t_start_p1 = time.perf_counter()
+    
     # 1. Generate scale dataset with semantic targets
     print(f"Generating scale database {DB_FILE} with {NUM_RECORDS:,} records...")
+    t_gen_start = time.perf_counter()
     generate_lcvk_file(DB_FILE, NUM_RECORDS)
-    
+    if trace_data is not None:
+        trace_data["p1_dataset_generation"] = time.perf_counter() - t_gen_start
+        
     # 2. Resolve native library path
+    t_lib_start = time.perf_counter()
     import platform
     if platform.system() == "Darwin":
         so_paths = [
@@ -199,11 +256,20 @@ def run_benchmark():
         sys.exit(1)
         
     engine = LcvkEngine(lib_path)
+    if trace_data is not None:
+        trace_data["p1_library_resolution"] = time.perf_counter() - t_lib_start
+        
+    duration_p1 = time.perf_counter() - t_start_p1
+    
+    t_start_p2 = time.perf_counter()
     
     # 3. Off-heap memory map via Panama FFM
     t_load_start = time.perf_counter()
     status = engine.load_index("lunar_index", DB_FILE)
-    t_load_ms = (time.perf_counter() - t_load_start) * 1000.0
+    t_load_duration = time.perf_counter() - t_load_start
+    t_load_ms = t_load_duration * 1000.0
+    if trace_data is not None:
+        trace_data["p2_native_mmap_load"] = t_load_duration
     
     if status != 0:
         print(f"[Error] Failed to load index. Code: {status}", file=sys.stderr)
@@ -225,7 +291,10 @@ def run_benchmark():
     
     t_vote_start = time.perf_counter()
     resonant_count = engine.query_planetary_grid("lunar_index", voting_queries, families, thresholds, voting_mask)
-    t_vote_ms = (time.perf_counter() - t_vote_start) * 1000.0
+    t_vote_duration = time.perf_counter() - t_vote_start
+    t_vote_ms = t_vote_duration * 1000.0
+    if trace_data is not None:
+        trace_data["p2_semantic_resonance_voting"] = t_vote_duration
     
     print(f"Resonant voting scan completed in {t_vote_ms:.3f} ms. Found {resonant_count} resonant tiles.")
     
@@ -258,6 +327,7 @@ def run_benchmark():
     print(f" {'Chunk Size':<12} | {'Scan Latency':<16} | {'Avg Query Latency':<20} | {'Throughput':<18} ")
     print("------------------------------------------------------------------------")
     
+    t_sweep_start = time.perf_counter()
     for chunk_size in chunk_sizes:
         # Set chunk size dynamically
         engine.set_chunk_size("lunar_index", chunk_size)
@@ -275,6 +345,9 @@ def run_benchmark():
         
         print(f" {chunk_size:<12,} | {t_search_ms:12.3f} ms | {avg_latency_us:16.2f} us | {throughput_mvps:12.2f} MVPS ")
         sweep_results.append((chunk_size, t_search_ms, avg_latency_us, throughput_mvps, t_search_sec))
+        
+    if trace_data is not None:
+        trace_data["p2_batch_search_chunk_sweep"] = time.perf_counter() - t_sweep_start
         
     print("========================================================================\n")
     
@@ -309,12 +382,45 @@ def run_benchmark():
     print(f"  - Effective Scan Bandwidth: {effective_bandwidth_gb_s:12.3f} GB/s")
     print("========================================================================\n")
     
+    duration_p2 = time.perf_counter() - t_start_p2
+    
     # 8. Teardown
     engine.close()
+    
+    # Save values to lcvk_metrics.json
+    import json
+    metrics_path = "lcvk_metrics.json"
+    metrics_data = {}
+    if os.path.exists(metrics_path):
+        try:
+            with open(metrics_path, "r") as f:
+                metrics_data = json.load(f)
+        except Exception:
+            pass
+            
+    metrics_data.update({
+        "best_mvps": float(best_mvps)
+    })
+    
+    with open(metrics_path, "w") as f:
+        json.dump(metrics_data, f, indent=2)
+        
     if os.path.exists(DB_FILE):
         os.remove(DB_FILE)
+        
+    # Generate updated plots automatically
+    try:
+        from generate_graphics import create_throughput_plot
+        create_throughput_plot()
+        print("Updated throughput comparison plot successfully.")
+    except Exception as e:
+        print(f"Warning: Could not regenerate throughput plot ({e})")
+        
+    print_performance_table(duration_p1, duration_p2, trace_data)
 
 if __name__ == "__main__":
     main_path = os.path.dirname(os.path.realpath(__file__))
     os.chdir(main_path)
-    run_benchmark()
+    args = parse_arguments()
+    trace_data = {} if args.trace else None
+    run_benchmark(trace_data)

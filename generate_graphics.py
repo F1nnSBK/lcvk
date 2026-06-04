@@ -1,5 +1,8 @@
 import os
+import json
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Set non-interactive backend
 import matplotlib.pyplot as plt
 
 # Set styling for ultra-premium dark mode
@@ -23,14 +26,37 @@ COLOR_MUTED = '#8b949e'     # Gray
 def normal_pdf(x, mu, sigma):
     return (1.0 / (sigma * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
 
+def load_metrics():
+    defaults = {
+        "mu_target": 67.25,
+        "std_target": 19.35,
+        "mu_other": 86.29,
+        "std_other": 15.96,
+        "threshold": 51,
+        "best_mvps": 2441.3
+    }
+    metrics_path = "lcvk_metrics.json"
+    if os.path.exists(metrics_path):
+        try:
+            with open(metrics_path, "r") as f:
+                data = json.load(f)
+                for k, v in data.items():
+                    defaults[k] = v
+            print(f"Loaded dynamic metrics from {metrics_path}")
+        except Exception as e:
+            print(f"Warning: Could not read {metrics_path} ({e}). Using default values.")
+    else:
+        print(f"No dynamic metrics file found at {metrics_path}. Using default values.")
+    return defaults
+
 def create_distribution_plot():
     fig, ax = plt.subplots(figsize=(10, 5.5), facecolor=DARK_BG)
     ax.set_facecolor(DARK_BG)
     
-    # Mathematical representation of real-data distribution from run_real_verification.py
-    # Target 7s vs Non-7s (Other digits)
-    mu_target, std_target = 67.25, 19.35
-    mu_other, std_other = 86.29, 15.96
+    metrics = load_metrics()
+    mu_target, std_target = metrics["mu_target"], metrics["std_target"]
+    mu_other, std_other = metrics["mu_other"], metrics["std_other"]
+    threshold = metrics["threshold"]
     
     x = np.linspace(20, 140, 1000)
     
@@ -45,9 +71,8 @@ def create_distribution_plot():
     ax.plot(x, y_other, color=COLOR_NAIVE, linewidth=2.5, label='Other Digits (0-6, 8-9 - Surface Terrain)')
     ax.fill_between(x, 0, y_other, color=COLOR_NAIVE, alpha=0.12)
     
-    # Highlight optimal threshold at 50 bits
-    threshold = 51
-    ax.axvline(x=threshold, color='#00f5a0', linestyle='--', linewidth=2, alpha=0.9, label='Optimal Threshold (51 bits, F1-optimized)')
+    # Highlight optimal threshold
+    ax.axvline(x=threshold, color='#00f5a0', linestyle='--', linewidth=2, alpha=0.9, label=f'Optimal Threshold ({threshold} bits, F1-optimized)')
     
     # Fill resonant region (True Positives area)
     x_resonant = np.linspace(20, threshold, 500)
@@ -70,21 +95,27 @@ def create_distribution_plot():
     ax.legend(facecolor=PANEL_BG, edgecolor=BORDER_COLOR, loc='upper right', fontsize=10)
     
     # Annotation for the threshold
-    ax.annotate('Quantization Cut-off\n(F1-Optimized @ 51 bits)', 
+    ax.annotate(f'Quantization Cut-off\n(F1-Optimized @ {threshold} bits)', 
                 xy=(threshold, 0.005), 
-                xytext=(threshold - 28, 0.013),
+                xytext=(max(20, threshold - 28), 0.013),
                 arrowprops=dict(arrowstyle="->", color='#00f5a0', lw=1.5),
                 color='#f0f6fc', fontsize=10, fontweight='bold', bbox=dict(boxstyle="round,pad=0.5", fc=PANEL_BG, ec=BORDER_COLOR, alpha=0.9))
 
     os.makedirs('assets', exist_ok=True)
-    out_path = 'assets/distribution_plot.svg'
-    plt.savefig(out_path, format='svg', bbox_inches='tight', transparent=True)
+    out_svg = 'assets/distribution_plot.svg'
+    out_png = 'assets/distribution_plot.png'
+    plt.savefig(out_svg, format='svg', bbox_inches='tight', transparent=True)
+    plt.savefig(out_png, format='png', dpi=300, bbox_inches='tight', transparent=True)
     plt.close()
-    print(f"Generated: {out_path}")
+    print(f"Generated: {out_svg}")
+    print(f"Generated: {out_png}")
 
 def create_throughput_plot():
     fig, ax = plt.subplots(figsize=(10, 5.5), facecolor=DARK_BG)
     ax.set_facecolor(DARK_BG)
+    
+    metrics = load_metrics()
+    best_mvps = metrics["best_mvps"]
     
     # Benchmarked throughput values (MVPS - Million Vectors Per Second)
     labels = [
@@ -94,9 +125,7 @@ def create_throughput_plot():
         'FAISS Baseline\n(IndexFlat, CPU Native)'
     ]
     
-    # Realistic throughput numbers matching our run results & standard CPU FAISS
-    mvps_values = [12.0, 35.3, 2441.3, 2250.0]
-    
+    mvps_values = [12.0, 35.3, best_mvps, 2250.0]
     colors = [COLOR_NAIVE, COLOR_MUTED, COLOR_LCVK, COLOR_FAISS]
     
     # Render horizontal bar chart
@@ -116,7 +145,7 @@ def create_throughput_plot():
     ax.set_xlabel('Throughput (Million Vectors/Sec - MVPS)', fontsize=12, labelpad=10)
     
     # Customize axis limits to fit labels nicely
-    ax.set_xlim(0, 3200)
+    ax.set_xlim(0, max(3200, best_mvps + 400))
     
     # Style grid and spines
     ax.grid(True, axis='x', color=GRID_COLOR, linestyle=':', alpha=0.6)
@@ -128,18 +157,23 @@ def create_throughput_plot():
     # Remove y-axis tick markers but keep labels
     ax.tick_params(axis='y', which='both', length=0, pad=15, labelsize=11)
     
-    # Highlight LCVK v2.0 close performance to FAISS
-    ax.annotate('~69x speedup via memory-aligned\nscalar operations and localized buffers', 
-                xy=(2441.3, 2.0), 
-                xytext=(1500, 1.2),
+    # Highlight LCVK speedup dynamically
+    speedup = best_mvps / 35.3
+    ax.annotate(f'~{speedup:.0f}x speedup via memory-aligned\nscalar operations and localized buffers', 
+                xy=(best_mvps, 2.0), 
+                xytext=(min(1500, best_mvps - 800), 1.2),
                 arrowprops=dict(arrowstyle="->", color=COLOR_LCVK, lw=1.5),
                 color=COLOR_LCVK, fontsize=10.5, fontweight='bold', 
                 bbox=dict(boxstyle="round,pad=0.6", fc=PANEL_BG, ec=BORDER_COLOR, alpha=0.9))
 
-    out_path = 'assets/throughput_comparison.svg'
-    plt.savefig(out_path, format='svg', bbox_inches='tight', transparent=True)
+    os.makedirs('assets', exist_ok=True)
+    out_svg = 'assets/throughput_comparison.svg'
+    out_png = 'assets/throughput_comparison.png'
+    plt.savefig(out_svg, format='svg', bbox_inches='tight', transparent=True)
+    plt.savefig(out_png, format='png', dpi=300, bbox_inches='tight', transparent=True)
     plt.close()
-    print(f"Generated: {out_path}")
+    print(f"Generated: {out_svg}")
+    print(f"Generated: {out_png}")
 
 if __name__ == '__main__':
     create_distribution_plot()

@@ -40,3 +40,5 @@ data/
 build-output/
 *.pth
 
+# Temporary benchmark metrics
+lcvk_metrics.json
