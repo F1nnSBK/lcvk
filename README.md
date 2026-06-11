@@ -225,9 +225,8 @@ Pithos transforms, binarizes, and indexes raw float vectors into 384-bit Matryos
 | **Actual Negative** | FP: 70,390 | TN: 764,082 |
 
 #### Search Execution Performance (Host-Native macOS)
-
-- **Scan Latency:** **44.67 ms** for 1,000,000 records (278 queries)
-- **Throughput:** **6,223.72 MVPS** (lock-free multi-family resonant voting)
+- **Scan Latency:** **43.95 ms** mean latency for 1,000,000 records (278 queries)
+- **Throughput:** **6,324.14 ± 160.33 MVPS** (95% Confidence Interval, $N=10$, mean: **6,324.14 MVPS**, $\sigma$: **224.14 MVPS**, using lock-free multi-family resonant voting)
 
 ### 2. High-Performance Native Performance vs. Baselines & Virtualization
 
@@ -238,10 +237,9 @@ Bypassing Docker Desktop's virtualization layer and running natively on the macO
 | Sequential JIT Compiled Baseline (float L2) | 4.52 MVPS |
 | FAISS Flat L2 (CPU Native) | 75.38 MVPS |
 | Pithos — Docker VM | 955.34 MVPS |
-| **Pithos — Host-Native macOS** | **6,223.72 MVPS** |
+| **Pithos — Host-Native macOS** | **6,324.14 MVPS** (95% CI: **[6,163.81, 6,484.47] MVPS**) |
 
-Host-native Pithos achieves a **~6.5× speedup** over Docker and a **~82.6× speedup** over native FAISS Flat L2.
-
+Host-native Pithos achieves a **~6.6× speedup** over Docker and a **~83.9× speedup** over native FAISS Flat L2.
 ### 3. Visual Charts (Vector Anomaly Distribution & Throughput Analysis)
 
 #### Hamming Distance Distribution
