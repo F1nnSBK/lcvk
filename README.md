@@ -32,7 +32,7 @@ Pithos is built on the premise that the database is a physical extension of the 
 ### 1. Isomorphic Transformation & Matryoshka Tiers
 Before binarization, raw input embeddings are transformed using a structured orthogonal mapping designed to preserve angular distance geometry:
 - **Rademacher Preconditioning ($D_{\mathrm{pre}}$):** A stochastic sign-flipping diagonal operator that whitens coordinate covariance and prevents signal entropy leakage:
-  $$D_{\mathrm{pre}} = \operatorname{diag}(d_1, \dots, d_D) \quad \text{where } d_j \in \{-1, 1\} \text{ are independent Rademacher variables.}$$
+  $$D_{\mathrm{pre}} = \mathrm{diag}(d_1, \dots, d_D) \quad \text{where } d_j \in \{-1, 1\} \text{ are independent Rademacher variables.}$$
   For an input vector $x \in \mathbb{R}^D$, preconditioning is computed as the Hadamard product:
   $$x' = x \odot d$$
 - **Block-Diagonal Walsh-Hadamard Rotation ($H_{\mathrm{BD}}$):** Rotation is computed as a direct sum ($\oplus$) of independent Sylvester-Hadamard matrices corresponding to each Matryoshka tier width $\Delta s_k = s_k - s_{k-1}$:
