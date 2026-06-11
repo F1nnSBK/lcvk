@@ -35,6 +35,8 @@ data/
 # Binary databases and NumPy arrays
 *.bin
 *.npy
+lunar_real_data
+pithos_scale_test
 
 # Build outputs
 build-output/
@@ -42,3 +44,4 @@ build-output/
 
 # Temporary benchmark metrics
 lcvk_metrics.json
+temp/

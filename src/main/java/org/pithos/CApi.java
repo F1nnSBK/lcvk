@@ -1,10 +1,11 @@
-package org.lcvk.vectordb;
+package org.pithos;
 
 import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.c.function.CEntryPoint;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CIntPointer;
 import org.graalvm.nativeimage.c.type.CLongPointer;
+import org.graalvm.nativeimage.c.type.CFloatPointer;
 import org.graalvm.nativeimage.c.type.CTypeConversion;
 
 import java.io.IOException;
@@ -13,7 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * C-API entry points for the binary vector database (LCVK).
+ * C-API entry points for the Pithos binary vector database.
  * Exposes methods to native callers using GraalVM {@link CEntryPoint}.
  */
 public class CApi {
@@ -22,7 +23,7 @@ public class CApi {
     private CApi() {}
 
     /**
-     * Initialisiert den globalen Datenbank-Koordinator.
+     * Initializes the global database coordinator.
      */
     @CEntryPoint(name = "vdb_init")
     public static int init(IsolateThread thread) {
@@ -36,10 +37,7 @@ public class CApi {
     }
 
     /**
-     * Mappt eine existierende Datenbankdatei off-heap in den virtuellen Speicher.
-     *
-     * @param name C-String Registername des Index
-     * @param path C-String Dateipfad zur Datenbankdatei
+     * Maps an existing database off-heap in the virtual memory without custom weights.
      */
     @CEntryPoint(name = "vdb_load_index")
     public static int loadIndex(IsolateThread thread, CCharPointer name, CCharPointer path) {
@@ -49,7 +47,7 @@ public class CApi {
         try {
             String indexName = CTypeConversion.toJavaString(name);
             String filePath = CTypeConversion.toJavaString(path);
-            db.loadIndex(indexName, filePath);
+            db.loadIndex(indexName, filePath, null, 0);
             return 0;
         } catch (IOException e) {
             return -5; // FILE IO ERROR
@@ -60,18 +58,45 @@ public class CApi {
     }
 
     /**
-     * Fuehrt eine batchierte KNN-Suche aus.
-     *
-     * @param indexName    Name des Index
-     * @param queries      Zeiger auf flaches Array mit Suchvektoren (numQueries * 6 longs)
-     * @param numQueries   Anzahl der Queries
-     * @param k            Anzahl der nächsten Nachbarn pro Query
-     * @param outIds       C-Array der Groesse (numQueries * k), in das IDs geschrieben werden
-     * @param outDistances C-Array der Groesse (numQueries * k), in das Distanzen geschrieben werden
+     * Maps an existing database off-heap, supplying frozen LoRA weights.
      */
-    @CEntryPoint(name = "vdb_batch_search")
-    public static int batchSearch(IsolateThread thread, CCharPointer indexName, CLongPointer queries, int numQueries, int k,
-                                 CLongPointer outIds, CIntPointer outDistances) {
+    @CEntryPoint(name = "vdb_load_index_with_weights")
+    public static int loadIndexWithWeights(IsolateThread thread, CCharPointer name, CCharPointer path,
+                                           CFloatPointer weights, int loraDim) {
+        if (db == null) {
+            return -1;
+        }
+        try {
+            String indexName = CTypeConversion.toJavaString(name);
+            String filePath = CTypeConversion.toJavaString(path);
+
+            Index tempIdx = FlatIndex.mapFile(filePath, null, 0);
+            int dim = tempIdx.getDimension();
+            tempIdx.close();
+
+            float[] javaWeights = new float[dim * loraDim];
+            for (int i = 0; i < javaWeights.length; i++) {
+                javaWeights[i] = weights.read(i);
+            }
+
+            db.loadIndex(indexName, filePath, javaWeights, loraDim);
+            return 0;
+        } catch (IOException e) {
+            return -5;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Retrieves database information metadata attributes.
+     */
+    @CEntryPoint(name = "vdb_get_info")
+    public static int getInfo(IsolateThread thread, CCharPointer indexName,
+                              CIntPointer outDimension, CLongPointer outSize,
+                              CCharPointer outPlanetId, CLongPointer outPlanetRadius,
+                              CIntPointer outTiersCount) {
         if (db == null) {
             return -1;
         }
@@ -82,18 +107,44 @@ public class CApi {
                 return -2;
             }
 
-            // Kopiere Queries in Java-Struktur
-            long[][] javaQueries = new long[numQueries][6];
+            outDimension.write(0, index.getDimension());
+            outSize.write(0, index.size());
+            outPlanetId.write(0, (byte) index.getPlanetId());
+            outPlanetRadius.write(0, index.getPlanetRadius());
+            outTiersCount.write(0, index.getTierCount());
+            return 0;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Performs a batch KNN search on float vectors.
+     */
+    @CEntryPoint(name = "vdb_batch_search")
+    public static int batchSearch(IsolateThread thread, CCharPointer indexName, CFloatPointer queries, int numQueries, int k,
+                                  CLongPointer outIds, CIntPointer outDistances) {
+        if (db == null) {
+            return -1;
+        }
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            Index index = db.getIndex(idxName);
+            if (index == null) {
+                return -2;
+            }
+
+            int dim = index.getDimension();
+            float[][] javaQueries = new float[numQueries][dim];
             for (int q = 0; q < numQueries; q++) {
-                for (int j = 0; j < 6; j++) {
-                    javaQueries[q][j] = queries.read(q * 6 + j);
+                for (int j = 0; j < dim; j++) {
+                    javaQueries[q][j] = queries.read(q * dim + j);
                 }
             }
 
-            // Ausfuehren der parallelen Suche
             List<Index.SearchResult>[] results = index.batchSearch(javaQueries, k);
 
-            // Schreibe Ergebnisse direkt in die C-Array-Buffer
             for (int q = 0; q < numQueries; q++) {
                 List<Index.SearchResult> queryResults = results[q];
                 int count = queryResults.size();
@@ -109,7 +160,7 @@ public class CApi {
                     outDistances.write(q * k + i, outDist);
                 }
             }
-            return 0; // SUCCESS
+            return 0;
         } catch (Throwable t) {
             t.printStackTrace();
             return -4;
@@ -117,19 +168,10 @@ public class CApi {
     }
 
     /**
-     * Fuehrt eine batchierte Suche aus und fuehrt ein Multi-Family Bitmask Voting ueber den globalen Voting-Buffer aus.
-     * Schreibt das Voting-Ergebnis (Bits 0-7) direkt zero-copy in den vom Aufrufer bereitgestellten Buffer.
-     *
-     * @param indexName       Name des Index
-     * @param queries         Zeiger auf flaches Array mit Suchvektoren (numQueries * 6 longs)
-     * @param queryFamilies   Zeiger auf Array mit Familie-ID pro Query (Länge numQueries)
-     * @param queryThresholds Zeiger auf Array mit Hamming-Distanztoleranz pro Query (Länge numQueries)
-     * @param numQueries      Anzahl der Queries
-     * @param votingMask      C-Pointer auf pre-allokiertes Byte-Array (Länge = totalTiles)
-     * @return Anzahl der resonant-gematchten Tiles (>= 7 gesetzte Bits), oder Fehlercode bei Wert < 0
+     * Performs a batch search and outputs matching candidate votes into the pre-allocated voting mask.
      */
     @CEntryPoint(name = "vdb_query_planetary_grid")
-    public static long queryPlanetaryGrid(IsolateThread thread, CCharPointer indexName, CLongPointer queries,
+    public static long queryPlanetaryGrid(IsolateThread thread, CCharPointer indexName, CFloatPointer queries,
                                           CIntPointer queryFamilies, CIntPointer queryThresholds, int numQueries,
                                           CCharPointer votingMask) {
         if (db == null) {
@@ -142,26 +184,24 @@ public class CApi {
                 return -2;
             }
 
+            int dim = index.getDimension();
             long totalTiles = index.size();
 
-            // Kopiere FFI-Arrays in native Java-Typen
-            long[][] javaQueries = new long[numQueries][6];
+            float[][] javaQueries = new float[numQueries][dim];
             int[] javaFamilies = new int[numQueries];
             int[] javaThresholds = new int[numQueries];
 
             for (int q = 0; q < numQueries; q++) {
-                for (int j = 0; j < 6; j++) {
-                    javaQueries[q][j] = queries.read(q * 6 + j);
+                for (int j = 0; j < dim; j++) {
+                    javaQueries[q][j] = queries.read(q * dim + j);
                 }
                 javaFamilies[q] = queryFamilies.read(q);
                 javaThresholds[q] = queryThresholds.read(q);
             }
 
-            // Wickle den rohen C-Buffer zero-copy in ein Panama MemorySegment
             long rawAddress = votingMask.rawValue();
             MemorySegment maskSegment = MemorySegment.ofAddress(rawAddress).reinterpret(totalTiles);
 
-            // Ausfuehren des Multi-Query Scans mit Bitmask Voting
             return index.queryPlanetaryGrid(javaQueries, javaFamilies, javaThresholds, maskSegment);
         } catch (Throwable t) {
             t.printStackTrace();
@@ -170,23 +210,31 @@ public class CApi {
     }
 
     /**
-     * Kompiliert rohe Vektordaten offline direkt in eine optimierte Binärdatei mit PLAN-Header.
+     * Compiles raw float records into a multi-tier database file layout.
      */
     @CEntryPoint(name = "vdb_compile_index_file")
     public static int compileIndexFile(IsolateThread thread, CCharPointer path, byte planetId, long planetRadius,
-                                       CLongPointer ids, CLongPointer vectors, int numRecords) {
+                                       int dimension, CIntPointer tiers, int numTiers,
+                                       CLongPointer ids, CFloatPointer vectors, int numRecords) {
         try {
             String filePath = CTypeConversion.toJavaString(path);
+            
+            int[] javaTiers = new int[numTiers];
+            for (int i = 0; i < numTiers; i++) {
+                javaTiers[i] = tiers.read(i);
+            }
+
             List<VectorRecord> records = new ArrayList<>(numRecords);
             for (int i = 0; i < numRecords; i++) {
                 long id = ids.read(i);
-                long[] vector = new long[6];
-                for (int j = 0; j < 6; j++) {
-                    vector[j] = vectors.read(i * 6 + j);
+                float[] vector = new float[dimension];
+                for (int j = 0; j < dimension; j++) {
+                    vector[j] = vectors.read(i * dimension + j);
                 }
                 records.add(new VectorRecord(id, vector));
             }
-            VectorDb.compileIndexFile(filePath, planetId, planetRadius, records);
+
+            VectorDb.compileIndexFile(filePath, planetId, planetRadius, dimension, javaTiers, records);
             return 0;
         } catch (Throwable t) {
             t.printStackTrace();
@@ -194,9 +242,6 @@ public class CApi {
         }
     }
 
-    /**
-     * Gibt die Anzahl der Datensätze im Index zurück.
-     */
     @CEntryPoint(name = "vdb_size")
     public static long size(IsolateThread thread, CCharPointer indexName) {
         if (db == null) {
@@ -210,9 +255,6 @@ public class CApi {
         return index.size();
     }
 
-    /**
-     * Loescht einen Index aus der Registrierung.
-     */
     @CEntryPoint(name = "vdb_drop_index")
     public static int dropIndex(IsolateThread thread, CCharPointer indexName) {
         if (db == null) {
@@ -222,13 +264,6 @@ public class CApi {
         return db.dropIndex(idxName) ? 0 : -2;
     }
 
-    /**
-     * Set the Disruptor execution chunk size dynamically for the specified index.
-     *
-     * @param indexName Name of the index
-     * @param chunkSize Size of each parallel search chunk
-     * @return 0 on success, negative error code on failure
-     */
     @CEntryPoint(name = "vdb_set_chunk_size")
     public static int setChunkSize(IsolateThread thread, CCharPointer indexName, long chunkSize) {
         if (db == null) {
@@ -252,8 +287,30 @@ public class CApi {
     }
 
     /**
-     * Schliesst die Datenbank und alle offenen Indizes, stoppt Hintergrund-Threads.
+     * Sets dynamic target energy budget tau (e.g. 0.90) for FlatIndex.
      */
+    @CEntryPoint(name = "vdb_set_energy_budget")
+    public static int setEnergyBudget(IsolateThread thread, CCharPointer indexName, double tau) {
+        if (db == null) {
+            return -1;
+        }
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            Index index = db.getIndex(idxName);
+            if (index == null) {
+                return -2;
+            }
+            if (index instanceof FlatIndex) {
+                ((FlatIndex) index).setTargetEnergyBudget(tau);
+                return 0;
+            }
+            return -3;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
     @CEntryPoint(name = "vdb_close")
     public static int closeDb(IsolateThread thread) {
         if (db != null) {
@@ -268,4 +325,3 @@ public class CApi {
         return 0;
     }
 }
-

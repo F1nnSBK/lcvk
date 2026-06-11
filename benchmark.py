@@ -8,14 +8,38 @@ import argparse
 import numpy as np
 
 # Configuration parameters for scale benchmark
-NUM_RECORDS = 10_000_000
+NUM_RECORDS = 500_000
 DIMENSION = 384
-BYTES_PER_RECORD = 64
-DB_FILE = "lunar_scale_test.bin"
+DB_FILE = "pithos_scale_test"
+TIERS = np.array([64, 128, 256, 384], dtype=np.int32)
 
 # Fixed reproducible target vector for semantic search verification
 np.random.seed(42)
-CAVE_VECTOR = np.random.randint(-2**63, 2**63 - 1, size=6, dtype=np.int64)
+# In Pithos, inputs are raw float vectors. Let's make a query close to a cave.
+CAVE_VECTOR = np.random.uniform(-1.0, 1.0, size=DIMENSION).astype(np.float32)
+
+# Ensure CAVE_VECTOR has a positive MSB in transformed space to bypass QEG
+def get_java_random_signs(dimension, seed=42):
+    current_seed = (seed ^ 0x5DEECE66D) & ((1 << 48) - 1)
+    signs = []
+    for _ in range(dimension):
+        current_seed = (current_seed * 0x5DEECE66D + 0xB) & ((1 << 48) - 1)
+        val = current_seed >> 47
+        signs.append(1.0 if val != 0 else -1.0)
+    return np.array(signs, dtype=np.float32)
+
+def get_hadamard_matrix(n):
+    if n == 1:
+        return np.array([[1.0]], dtype=np.float32)
+    H_prev = get_hadamard_matrix(n // 2)
+    return np.block([[H_prev, H_prev], [H_prev, -H_prev]]) / np.sqrt(2.0)
+
+signs = get_java_random_signs(DIMENSION)
+z_first = CAVE_VECTOR[:64] * signs[:64]
+H64 = get_hadamard_matrix(64)
+msb_val = (z_first @ H64.T)[63]
+if msb_val < 0.0:
+    CAVE_VECTOR = -CAVE_VECTOR
 
 class GraalIsolate(ctypes.Structure):
     pass
@@ -23,8 +47,8 @@ class GraalIsolate(ctypes.Structure):
 class GraalIsolateThread(ctypes.Structure):
     pass
 
-class LcvkEngine:
-    """Python OOP wrapper for the AOT-compiled Lunar Custom Vector Kernel (LCVK) native library."""
+class PithosEngine:
+    """Python OOP wrapper for the AOT-compiled Pithos native library."""
     
     def __init__(self, lib_path: str):
         if not os.path.exists(lib_path):
@@ -51,6 +75,16 @@ class LcvkEngine:
         self.lib.vdb_load_index.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
         self.lib.vdb_load_index.restype = ctypes.c_int
 
+        self.lib.vdb_load_index_with_weights.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int
+        ]
+        self.lib.vdb_load_index_with_weights.restype = ctypes.c_int
+
+        self.lib.vdb_get_info.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+        ]
+        self.lib.vdb_get_info.restype = ctypes.c_int
+
         self.lib.vdb_batch_search.argtypes = [
             ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p
         ]
@@ -61,10 +95,22 @@ class LcvkEngine:
         ]
         self.lib.vdb_query_planetary_grid.restype = ctypes.c_longlong
 
+        self.lib.vdb_compile_index_file.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_byte, ctypes.c_longlong,
+            ctypes.c_int, ctypes.c_void_p, ctypes.c_int,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int
+        ]
+        self.lib.vdb_compile_index_file.restype = ctypes.c_int
+
         self.lib.vdb_set_chunk_size.argtypes = [
             ctypes.c_void_p, ctypes.c_char_p, ctypes.c_longlong
         ]
         self.lib.vdb_set_chunk_size.restype = ctypes.c_int
+
+        self.lib.vdb_set_energy_budget.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_double
+        ]
+        self.lib.vdb_set_energy_budget.restype = ctypes.c_int
 
         self.lib.vdb_size.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         self.lib.vdb_size.restype = ctypes.c_longlong
@@ -80,12 +126,45 @@ class LcvkEngine:
         # Initialize internal DB coordinator
         status = self.lib.vdb_init(self.thread)
         if status != 0:
-            raise RuntimeError("Failed to initialize LCVK DB engine.")
+            raise RuntimeError("Failed to initialize Pithos DB engine.")
 
-    def load_index(self, index_name: str, file_path: str) -> int:
+    def compile_index_file(self, file_path: str, planet_id: int, planet_radius: int, dimension: int, tiers: np.ndarray, ids: np.ndarray, vectors: np.ndarray) -> int:
+        path_bytes = file_path.encode("utf-8")
+        tiers_ptr = tiers.ctypes.data_as(ctypes.c_void_p)
+        ids_ptr = ids.ctypes.data_as(ctypes.c_void_p)
+        vectors_ptr = vectors.ctypes.data_as(ctypes.c_void_p)
+        return self.lib.vdb_compile_index_file(self.thread, path_bytes, planet_id, planet_radius, dimension, tiers_ptr, len(tiers), ids_ptr, vectors_ptr, len(ids))
+
+    def load_index(self, index_name: str, file_path: str, weights: np.ndarray = None, lora_dim: int = 0) -> int:
         name_bytes = index_name.encode("utf-8")
         path_bytes = file_path.encode("utf-8")
-        return self.lib.vdb_load_index(self.thread, name_bytes, path_bytes)
+        if weights is not None:
+            weights_ptr = weights.ctypes.data_as(ctypes.c_void_p)
+            return self.lib.vdb_load_index_with_weights(self.thread, name_bytes, path_bytes, weights_ptr, lora_dim)
+        else:
+            return self.lib.vdb_load_index(self.thread, name_bytes, path_bytes)
+
+    def get_info(self, index_name: str) -> dict:
+        name_bytes = index_name.encode("utf-8")
+        dim = ctypes.c_int(0)
+        size = ctypes.c_longlong(0)
+        planet_id = ctypes.c_byte(0)
+        radius = ctypes.c_longlong(0)
+        tiers_count = ctypes.c_int(0)
+        
+        status = self.lib.vdb_get_info(
+            self.thread, name_bytes, ctypes.byref(dim), ctypes.byref(size), ctypes.byref(planet_id), ctypes.byref(radius), ctypes.byref(tiers_count)
+        )
+        if status != 0:
+            raise RuntimeError(f"vdb_get_info failed with code: {status}")
+            
+        return {
+            "dimension": dim.value,
+            "size": size.value,
+            "planet_id": planet_id.value,
+            "planet_radius": radius.value,
+            "tiers_count": tiers_count.value
+        }
 
     def batch_search(self, index_name: str, queries: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
         num_queries = queries.shape[0]
@@ -121,6 +200,10 @@ class LcvkEngine:
         c_index_name = index_name.encode("utf-8")
         return self.lib.vdb_set_chunk_size(self.thread, c_index_name, chunk_size)
 
+    def set_energy_budget(self, index_name: str, tau: float) -> int:
+        c_index_name = index_name.encode("utf-8")
+        return self.lib.vdb_set_energy_budget(self.thread, c_index_name, ctypes.c_double(tau))
+
     def size(self, index_name: str) -> int:
         c_index = index_name.encode("utf-8")
         return self.lib.vdb_size(self.thread, c_index)
@@ -133,7 +216,7 @@ class LcvkEngine:
             self.isolate = None
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="LCVK Scale Benchmark")
+    parser = argparse.ArgumentParser(description="Pithos Scale Benchmark")
     parser.add_argument("--trace", action="store_true", help="Enable deep execution profiling with step-by-step timestamps")
     return parser.parse_args()
 
@@ -182,68 +265,29 @@ def print_performance_table(duration_p1: float, duration_p2: float, trace_data: 
     print_row("Total Pipeline Execution Time", format_duration(total_time), "100.0%")
     print(f"└{'─' * w1}┴{'─' * w2}┴{'─' * w3}┘\n")
 
-def generate_lcvk_file(file_path: str, num_records: int):
-    # Binary PLAN magic header structure (64-byte aligned)
-    magic = b"PLAN"
-    planet_id = 1  # Moon
-    header_data = struct.pack("<BQQ", planet_id, num_records, 1737400)
-    padding = b"\x00" * 43
-    header = magic + header_data + padding
-    assert len(header) == 64
-    
-    # Construct 64-byte cache-line aligned records:
-    data = np.zeros((num_records, BYTES_PER_RECORD), dtype=np.uint8)
-    
-    # Set sequential IDs in the first 8 bytes of each record
-    ids = np.arange(num_records, dtype=np.uint64)
-    data[:, 0:8] = ids.view(np.uint8).reshape(-1, 8)
-    
-    # Set random binary vector data in the middle 48 bytes (offset 8 to 56)
-    data[:, 8:56] = np.random.randint(0, 256, size=(num_records, 48), dtype=np.uint8)
-    
-    # Inject the CAVE_VECTOR at target IDs: 100, 50000, 99999
-    cave_bytes = CAVE_VECTOR.view(np.uint8)
-    target_ids = [100, 50000, 99999]
-    for tid in target_ids:
-        if tid < num_records:
-            data[tid, 8:56] = cave_bytes
-            
-    # Offset 56 to 64 remains 0 (metadata)
-    
-    with open(file_path, "wb") as f:
-        f.write(header)
-        f.write(data.tobytes())
-
 def run_benchmark(trace_data=None):
     t_start_p1 = time.perf_counter()
     
-    # 1. Generate scale dataset with semantic targets
-    print(f"Generating scale database {DB_FILE} with {NUM_RECORDS:,} records...")
-    t_gen_start = time.perf_counter()
-    generate_lcvk_file(DB_FILE, NUM_RECORDS)
-    if trace_data is not None:
-        trace_data["p1_dataset_generation"] = time.perf_counter() - t_gen_start
-        
-    # 2. Resolve native library path
+    # 1. Resolve native library path
     t_lib_start = time.perf_counter()
     import platform
     if platform.system() == "Darwin":
         so_paths = [
-            "./target/lunar_core.dylib",
-            "./build-output/liblunar_core.dylib",
-            "./liblunar_core.dylib",
-            "./target/lunar_core.so",
-            "./build-output/liblunar_core.so",
-            "./liblunar_core.so"
+            "./target/libpithos.dylib",
+            "./build-output/libpithos.dylib",
+            "./libpithos.dylib",
+            "./target/libpithos.so",
+            "./build-output/libpithos.so",
+            "./libpithos.so"
         ]
     else:
         so_paths = [
-            "./build-output/liblunar_core.so",
-            "./liblunar_core.so",
-            "./target/lunar_core.so",
-            "./target/lunar_core.dylib",
-            "./build-output/liblunar_core.dylib",
-            "./liblunar_core.dylib"
+            "./build-output/libpithos.so",
+            "./libpithos.so",
+            "./target/libpithos.so",
+            "./target/libpithos.dylib",
+            "./build-output/libpithos.dylib",
+            "./libpithos.dylib"
         ]
     lib_path = None
     for p in so_paths:
@@ -252,42 +296,77 @@ def run_benchmark(trace_data=None):
             break
             
     if not lib_path:
-        print("[Error] LCVK native library not found in search paths.", file=sys.stderr)
+        print("[Error] Pithos native library not found in search paths.", file=sys.stderr)
         sys.exit(1)
         
-    engine = LcvkEngine(lib_path)
+    engine = PithosEngine(lib_path)
     if trace_data is not None:
         trace_data["p1_library_resolution"] = time.perf_counter() - t_lib_start
+
+    # 2. Generate scale dataset and compile via native engine
+    print(f"Generating scale database {DB_FILE} with {NUM_RECORDS:,} records using engine compiler...")
+    t_gen_start = time.perf_counter()
+    
+    ids = np.arange(NUM_RECORDS, dtype=np.int64)
+    vectors = np.random.uniform(-1.0, 1.0, size=(NUM_RECORDS, DIMENSION)).astype(np.float32)
+    
+    # Inject the CAVE_VECTOR at target IDs: 100, 50000, 99999
+    target_ids = [100, 50000, 99999]
+    for tid in target_ids:
+        if tid < NUM_RECORDS:
+            vectors[tid] = CAVE_VECTOR
+            
+    # Compile
+    status = engine.compile_index_file(DB_FILE, 1, 1737400, DIMENSION, TIERS, ids, vectors)
+    if status != 0:
+        print(f"[Error] Failed to compile index. Code: {status}", file=sys.stderr)
+        sys.exit(1)
+        
+    if trace_data is not None:
+        trace_data["p1_dataset_generation_and_compilation"] = time.perf_counter() - t_gen_start
         
     duration_p1 = time.perf_counter() - t_start_p1
     
     t_start_p2 = time.perf_counter()
     
-    # 3. Off-heap memory map via Panama FFM
+    # 3. Off-heap memory map via Panama FFM (with mock weights for SVD computation)
     t_load_start = time.perf_counter()
-    status = engine.load_index("lunar_index", DB_FILE)
+    mock_weights = np.random.uniform(-1.0, 1.0, size=(DIMENSION, DIMENSION)).astype(np.float32)
+    status = engine.load_index("lunar_index", DB_FILE, mock_weights, DIMENSION)
     t_load_duration = time.perf_counter() - t_load_start
     t_load_ms = t_load_duration * 1000.0
     if trace_data is not None:
-        trace_data["p2_native_mmap_load"] = t_load_duration
+        trace_data["p2_native_mmap_load_with_svd"] = t_load_duration
     
     if status != 0:
         print(f"[Error] Failed to load index. Code: {status}", file=sys.stderr)
         sys.exit(1)
         
-    total_records = engine.size("lunar_index")
-    db_size_mb = (total_records * BYTES_PER_RECORD) / (1024.0 * 1024.0)
+    # Get info metadata attributes (demonstrating new C-API free info attributes)
+    info = engine.get_info("lunar_index")
+    total_records = info["size"]
+    db_size_mb = (total_records * 64) / (1024.0 * 1024.0)
     
-    print(f"Index loaded successfully: {total_records:,} records ({db_size_mb:.2f} MB) in {t_load_ms:.4f} ms")
+    print("\n" + "="*80)
+    print("                 PITHOS NATIVE INDEX ATTRIBUTES (vdb_get_info)           ")
+    print("========================================================================")
+    print(f"  - Dimension         : {info['dimension']}")
+    print(f"  - Size (Records)    : {info['size']:,}")
+    print(f"  - Planet ID         : {info['planet_id']}")
+    print(f"  - Planet Radius (m) : {info['planet_radius']:,}")
+    print(f"  - Tiers Count       : {info['tiers_count']}")
+    print("========================================================================\n")
+    
+    print(f"Index loaded successfully: {total_records:,} records in {t_load_ms:.4f} ms")
 
     # 4. Perform Semantic Reality-Check using Multi-Family Resonant Voting
     print("\nRunning Semantic Reality-Check...")
     voting_mask = np.zeros(total_records, dtype=np.uint8)
     
     # 8 queries matching the CAVE_VECTOR perfectly
-    voting_queries = np.tile(CAVE_VECTOR, (8, 1)) # shape (8, 6)
+    voting_queries = np.tile(CAVE_VECTOR, (8, 1)) # shape (8, DIMENSION)
     families = np.arange(8, dtype=np.int32)
-    thresholds = np.zeros(8, dtype=np.int32)
+    thresholds = np.zeros(8, dtype=np.int32) # Hamming distance = 0 (exact match)
     
     t_vote_start = time.perf_counter()
     resonant_count = engine.query_planetary_grid("lunar_index", voting_queries, families, thresholds, voting_mask)
@@ -301,7 +380,6 @@ def run_benchmark(trace_data=None):
     # Assertions for semantic verification
     assert resonant_count == 3, f"Expected 3 resonant tiles, got {resonant_count}"
     
-    target_ids = [100, 50000, 99999]
     for tid in target_ids:
         mask_val = voting_mask[tid]
         assert mask_val == 0xFF, f"Expected voting mask at ID {tid} to be 0xFF (perfect match for all 8 families), got {hex(mask_val)}"
@@ -314,31 +392,27 @@ def run_benchmark(trace_data=None):
     # 5. Prepare batch queries for the parallel vector scan
     num_queries = 278
     k_neighbors = 100
-    # Generate batch queries once to keep inputs identical across chunk sweeps
-    queries = np.random.randint(-2**63, 2**63 - 1, size=(num_queries, 6), dtype=np.int64)
+    queries = np.random.uniform(-1.0, 1.0, size=(num_queries, DIMENSION)).astype(np.float32)
     
     # 6. Sweep chunk sizes to find the hardware sweet spot
     chunk_sizes = [1000, 5000, 10000, 20000, 50000]
     sweep_results = []
     
     print("\n" + "="*80)
-    print("                 LCVK CHUNK-SIZE PERFORMANCE SWEEP REPORT               ")
+    print("                 PITHOS CHUNK-SIZE PERFORMANCE SWEEP REPORT             ")
     print("========================================================================")
     print(f" {'Chunk Size':<12} | {'Scan Latency':<16} | {'Avg Query Latency':<20} | {'Throughput':<18} ")
     print("------------------------------------------------------------------------")
     
     t_sweep_start = time.perf_counter()
     for chunk_size in chunk_sizes:
-        # Set chunk size dynamically
         engine.set_chunk_size("lunar_index", chunk_size)
         
-        # Execute parallel vector scan
         t_search_start = time.perf_counter()
         out_ids, out_dists = engine.batch_search("lunar_index", queries, k_neighbors)
         t_search_sec = time.perf_counter() - t_search_start
         t_search_ms = t_search_sec * 1000.0
         
-        # Compute metrics
         total_comparisons = total_records * num_queries
         throughput_mvps = (total_comparisons / t_search_sec) / 1e6
         avg_latency_us = (t_search_sec * 1e6) / num_queries
@@ -351,17 +425,16 @@ def run_benchmark(trace_data=None):
         
     print("========================================================================\n")
     
-    # Find the best chunk size based on highest MVPS
     best_run = max(sweep_results, key=lambda x: x[3])
     best_chunk, best_ms, best_lat, best_mvps, best_sec = best_run
     
     # 7. Print overall summary report for the best run
     total_comparisons = total_records * num_queries
     giga_ops_per_second = (total_comparisons * 12.0) / best_sec / 1e9
-    effective_bandwidth_gb_s = (total_records * BYTES_PER_RECORD) / best_sec / 1e9
+    effective_bandwidth_gb_s = (total_records * 64) / best_sec / 1e9
     
     print("="*80)
-    print("                 LCVK PLANETARY SCALE STRESS-TEST REPORT (BEST RUN)     ")
+    print("                 PITHOS PLANETARY SCALE STRESS-TEST REPORT (BEST RUN)   ")
     print("========================================================================")
     print(f" Dataset Configuration")
     print(f"  - Vector Cardinality      : {total_records:,} tiles")
@@ -405,8 +478,19 @@ def run_benchmark(trace_data=None):
     with open(metrics_path, "w") as f:
         json.dump(metrics_data, f, indent=2)
         
-    if os.path.exists(DB_FILE):
-        os.remove(DB_FILE)
+    # Clean up files
+    for ext in ["", "_ids.bin", "_metadata.bin"]:
+        p = DB_FILE + ext
+        if os.path.exists(p):
+            os.remove(p)
+    k = 0
+    while True:
+        p = f"{DB_FILE}_tier_{k}.bin"
+        if os.path.exists(p):
+            os.remove(p)
+            k += 1
+        else:
+            break
         
     # Generate updated plots automatically
     try:

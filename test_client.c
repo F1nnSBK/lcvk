@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "lunar_core.h"
+#include "pithos.h"
 
 // Helper function to calculate elapsed time in milliseconds
 double get_elapsed_ms(struct timespec start, struct timespec end) {
@@ -27,8 +27,7 @@ int main() {
     double t_load_index = 0.0;
     double t_knn_search = 0.0;
     double t_voting_search = 0.0;
-    double t_isolate_teardown = 0.0;
-
+    
     printf("[C Client] Creating GraalVM Isolate...\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
     if (graal_create_isolate(NULL, &isolate, &thread) != 0) {
@@ -39,7 +38,7 @@ int main() {
     t_isolate_create = get_elapsed_ms(start, end);
     printf("[C Client] Isolate created in %.3f ms\n", t_isolate_create);
 
-    printf("[C Client] Initializing LCVK Database...\n");
+    printf("[C Client] Initializing Pithos Database...\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
     int status = vdb_init(thread);
     if (status != 0) {
@@ -51,35 +50,43 @@ int main() {
     t_db_init = get_elapsed_ms(start, end);
     printf("[C Client] Database initialized in %.3f ms\n", t_db_init);
 
-    // 1. Compile test database file (PLAN header, 384-bit binary vectors)
-    printf("[C Client] Compiling test binary vector file 'lunar_test.lcvk'...\n");
+    // 1. Compile test database file
+    int dimension = 64;
+    int num_records = 3;
     long long ids[] = {0, 1, 2};
-    // 3 vectors, each 6 longs (384 bits)
-    long long vectors[] = {
-        // Record 0: all zeros
-        0, 0, 0, 0, 0, 0,
-        // Record 1: 4 bits set in first long (value 15 = 0b1111)
-        15, 0, 0, 0, 0, 0,
-        // Record 2: 2 bits set in first long (value 3 = 0b0011)
-        3, 0, 0, 0, 0, 0
-    };
+    int tiers[] = {32, 64};
+    int num_tiers = 2;
 
+    float *vectors = (float *)calloc(num_records * dimension, sizeof(float));
+    // Record 0: all 0.0
+    // Record 1: all 1.0
+    for (int i = 0; i < dimension; i++) {
+        vectors[1 * dimension + i] = 1.0f;
+    }
+    // Record 2: first half 1.0, second half 0.0
+    for (int i = 0; i < 32; i++) {
+        vectors[2 * dimension + i] = 1.0f;
+    }
+
+    printf("[C Client] Compiling test binary vector file 'pithos_test.bin'...\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
     // Planet ID = 1 (Moon), Radius = 1737400 meters
-    status = vdb_compile_index_file(thread, "lunar_test.lcvk", (char)1, 1737400LL, ids, vectors, 3);
+    status = vdb_compile_index_file(thread, "pithos_test.bin", (char)1, 1737400LL, dimension, tiers, num_tiers, ids, vectors, num_records);
     if (status != 0) {
         fprintf(stderr, "[C Client] Index compilation failed (code: %d)\n", status);
+        free(vectors);
         graal_tear_down_isolate(thread);
         return 1;
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
     t_compile_index = get_elapsed_ms(start, end);
     printf("[C Client] Index compiled in %.3f ms\n", t_compile_index);
+    free(vectors);
 
     // 2. Load the compiled index using off-heap memory mapping
-    printf("[C Client] Loading memory-mapped index 'lunar_index' from 'lunar_test.lcvk'...\n");
+    printf("[C Client] Loading memory-mapped index 'lunar_index' from 'pithos_test.bin'...\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
-    status = vdb_load_index(thread, "lunar_index", "lunar_test.lcvk");
+    status = vdb_load_index(thread, "lunar_index", "pithos_test.bin");
     if (status != 0) {
         fprintf(stderr, "[C Client] Failed to load index (code: %d)\n", status);
         graal_tear_down_isolate(thread);
@@ -89,20 +96,40 @@ int main() {
     t_load_index = get_elapsed_ms(start, end);
     printf("[C Client] Mapped index loaded in %.3f ms\n", t_load_index);
 
-    long long size = vdb_size(thread, "lunar_index");
-    printf("[C Client] Mapped index size: %lld records\n", size);
+    // Fetch and display database attributes
+    int outDimension = 0;
+    long long outSize = 0;
+    char outPlanetId = 0;
+    long long outPlanetRadius = 0;
+    int outTiersCount = 0;
+    status = vdb_get_info(thread, "lunar_index", &outDimension, &outSize, &outPlanetId, &outPlanetRadius, &outTiersCount);
+    if (status != 0) {
+        fprintf(stderr, "[C Client] Failed to get index info (code: %d)\n", status);
+    } else {
+        printf("\n========================================================================\n");
+        printf("[C Client] Pithos Index Metadata Attributes:\n");
+        printf("  - Dimension         : %d\n", outDimension);
+        printf("  - Size (Records)    : %lld\n", outSize);
+        printf("  - Planet ID         : %d\n", (int)outPlanetId);
+        printf("  - Planet Radius (m) : %lld\n", outPlanetRadius);
+        printf("  - Tiers Count       : %d\n", outTiersCount);
+        printf("========================================================================\n\n");
+    }
 
     // 3. Test Standard Batch Search (KNN)
-    printf("\n[C Client] Running standard KNN batch search...\n");
-    long long knn_queries[] = {
-        // Query 1: matches Record 1 perfectly (15)
-        15, 0, 0, 0, 0, 0,
-        // Query 2: close to Record 2 (3), query with 2 (0b0010)
-        2, 0, 0, 0, 0, 0
-    };
+    printf("[C Client] Running standard KNN batch search...\n");
+    float *knn_queries = (float *)calloc(2 * dimension, sizeof(float));
+    // Query 1: matches Record 1 (all 1.0f)
+    for (int i = 0; i < dimension; i++) {
+        knn_queries[0 * dimension + i] = 1.0f;
+    }
+    // Query 2: matches Record 2 (first half 1.0f, second half 0.0f)
+    for (int i = 0; i < 32; i++) {
+        knn_queries[1 * dimension + i] = 1.0f;
+    }
+
     int num_queries = 2;
     int k = 2;
-
     long long out_ids[4];
     int out_distances[4];
 
@@ -110,11 +137,12 @@ int main() {
     status = vdb_batch_search(thread, "lunar_index", knn_queries, num_queries, k, out_ids, out_distances);
     clock_gettime(CLOCK_MONOTONIC, &end);
     t_knn_search = get_elapsed_us(start, end);
-    
+    free(knn_queries);
+
     if (status != 0) {
         fprintf(stderr, "[C Client] Batch search failed (code: %d)\n", status);
     } else {
-        printf("[C Client] KNN search completed in %.3f us (%.4f ms). Results:\n", t_knn_search, t_knn_search / 1000.0);
+        printf("[C Client] KNN search completed in %.3f us. Results:\n", t_knn_search);
         for (int q = 0; q < num_queries; q++) {
             printf("  Query %d results:\n", q + 1);
             for (int i = 0; i < k; i++) {
@@ -126,22 +154,20 @@ int main() {
 
     // 4. Test Multi-Family Resonant Voting
     printf("\n[C Client] Running Multi-Family Resonant Voting search...\n");
-    long long voting_queries[] = {
-        15, 0, 0, 0, 0, 0,
-        15, 0, 0, 0, 0, 0,
-        15, 0, 0, 0, 0, 0,
-        15, 0, 0, 0, 0, 0,
-        15, 0, 0, 0, 0, 0,
-        15, 0, 0, 0, 0, 0,
-        15, 0, 0, 0, 0, 0,
-        15, 0, 0, 0, 0, 0
-    };
-    int voting_families[] = {0, 1, 2, 3, 4, 5, 6, 7};
-    int voting_thresholds[] = {0, 0, 0, 0, 0, 0, 0, 0}; // Strict exact match (Hamming distance = 0)
     int num_voting_queries = 8;
+    float *voting_queries = (float *)calloc(num_voting_queries * dimension, sizeof(float));
+    // All queries align with Record 1 (all 1.0f)
+    for (int q = 0; q < num_voting_queries; q++) {
+        for (int j = 0; j < dimension; j++) {
+            voting_queries[q * dimension + j] = 1.0f;
+        }
+    }
 
-    char *voting_mask = (char *)malloc(size);
-    memset(voting_mask, 0, size);
+    int voting_families[] = {0, 1, 2, 3, 4, 5, 6, 7};
+    int voting_thresholds[] = {0, 0, 0, 0, 0, 0, 0, 0}; 
+
+    char *voting_mask = (char *)malloc(outSize);
+    memset(voting_mask, 0, outSize);
 
     clock_gettime(CLOCK_MONOTONIC, &start);
     long long resonant_count = vdb_query_planetary_grid(
@@ -149,46 +175,24 @@ int main() {
     );
     clock_gettime(CLOCK_MONOTONIC, &end);
     t_voting_search = get_elapsed_us(start, end);
+    free(voting_queries);
 
     if (resonant_count < 0) {
         fprintf(stderr, "[C Client] query_planetary_grid failed (code: %lld)\n", resonant_count);
     } else {
-        printf("[C Client] Resonant voting completed in %.3f us (%.4f ms). Found %lld resonant tiles (>= 7 active bits):\n", 
-               t_voting_search, t_voting_search / 1000.0, resonant_count);
-        for (int i = 0; i < size; i++) {
-            printf("  Tile ID %d: voting_mask = 0x%02X (popcount = %d)\n", i, (unsigned char)voting_mask[i], __builtin_popcount((unsigned char)voting_mask[i]));
+        printf("[C Client] Resonant voting completed in %.3f us. Found %lld resonant tiles:\n", 
+               t_voting_search, resonant_count);
+        for (int i = 0; i < outSize; i++) {
+            printf("  Tile ID %d: voting_mask = 0x%02X\n", i, (unsigned char)voting_mask[i]);
         }
     }
-
     free(voting_mask);
 
-    printf("\n[C Client] Closing LCVK Database...\n");
+    printf("\n[C Client] Closing Pithos Database...\n");
     vdb_close(thread);
 
     printf("[C Client] Tearing down GraalVM Isolate...\n");
-    clock_gettime(CLOCK_MONOTONIC, &start);
     graal_tear_down_isolate(thread);
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    t_isolate_teardown = get_elapsed_ms(start, end);
-    printf("[C Client] Isolate torn down in %.3f ms\n", t_isolate_teardown);
-
-    // Beautiful High-Resolution Timing Report
-    printf("\n");
-    printf("========================================================================\n");
-    printf("                  LCVK NATIVE ENGINE BENCHMARK REPORT                   \n");
-    printf("========================================================================\n");
-    printf("  Operation                       | Latency                             \n");
-    printf("----------------------------------+-------------------------------------\n");
-    printf("  1. GraalVM Isolate Creation     | %10.3f ms                           \n", t_isolate_create);
-    printf("  2. LCVK DB Engine Init          | %10.3f ms                           \n", t_db_init);
-    printf("  3. Offline Index Compilation    | %10.3f ms                           \n", t_compile_index);
-    printf("  4. Zero-Copy Index Memory-Map   | %10.3f ms                           \n", t_load_index);
-    printf("  5. Parallel KNN Batch Search    | %10.3f us  (Avg: %8.3f us/query)   \n", t_knn_search, t_knn_search / num_queries);
-    printf("  6. Resonant Voting Search       | %10.3f us  (Avg: %8.3f us/query)   \n", t_voting_search, t_voting_search / num_voting_queries);
-    printf("  7. GraalVM Isolate Teardown     | %10.3f ms                           \n", t_isolate_teardown);
-    printf("========================================================================\n");
-    printf("  Index Configuration: %lld records, 384-bit vectors off-heap mapped\n", size);
-    printf("========================================================================\n");
 
     printf("[C Client] Finished successfully!\n");
     return 0;

@@ -2,252 +2,239 @@ import os
 import sys
 import struct
 import numpy as np
-from PIL import Image
-import torch
-import torch.nn as nn
-from peft import LoraConfig, PeftModel
+
+try:
+    from PIL import Image
+    import torch
+    import torch.nn as nn
+    from peft import LoraConfig, PeftModel
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
+from benchmark import PithosEngine
 
 # Configuration
 NUM_RECORDS = 1_000_000
 DIMENSION = 384
-BYTES_PER_RECORD = 64
-DB_FILE = "lunar_real_data.bin"
+DB_FILE = "lunar_real_data"
+TIERS = np.array([64, 128, 256, 384], dtype=np.int32)
 
 # Fixed seed for reproducibility
 np.random.seed(42)
 
-# Generate sign matrix D and H384
-D = np.random.choice([-1, 1], size=DIMENSION).astype(np.float32)
-
-def get_hadamard_384():
-    def silvester_hadamard(n):
-        if n == 1:
-            return np.array([[1]])
-        H_prev = silvester_hadamard(n // 2)
-        return np.block([[H_prev, H_prev], [H_prev, -H_prev]])
-        
-    H32 = silvester_hadamard(32)
-    H12 = np.array([
-        [1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1],
-        [1, -1,  1, -1,  1,  1,  1, -1, -1, -1,  1, -1],
-        [1, -1, -1,  1, -1,  1,  1,  1, -1, -1, -1,  1],
-        [1,  1, -1, -1,  1, -1,  1,  1,  1, -1, -1, -1],
-        [1, -1,  1, -1, -1,  1, -1,  1,  1,  1, -1, -1],
-        [1, -1, -1,  1, -1, -1,  1, -1,  1,  1,  1, -1],
-        [1, -1, -1, -1,  1, -1, -1,  1, -1,  1,  1,  1],
-        [1,  1, -1, -1, -1,  1, -1, -1,  1, -1,  1,  1],
-        [1,  1,  1, -1, -1, -1,  1, -1, -1,  1, -1,  1],
-        [1,  1,  1,  1, -1, -1, -1,  1, -1, -1,  1, -1],
-        [1, -1,  1,  1,  1, -1, -1, -1,  1, -1, -1,  1],
-        [1,  1, -1,  1,  1,  1, -1, -1, -1,  1, -1, -1]
-    ])
-    return np.kron(H12, H32).astype(np.float32)
-
-H384 = get_hadamard_384()
-
-class DinoExtractor(nn.Module):
-    """
-    Dual-mode DINOv3 feature extractor.
-
-    use_adapter=False  -> Naked DINOv3 backbone (System Verification / MNIST baseline).
-                          Provides maximum class separation for well-labeled test data.
-    use_adapter=True   -> DINOv3 + Lunar LoRA adapter (Production / Planetary Discovery).
-                          Optimized to detect lunar pit/cave morphology in real NAC tile data.
-    """
-    def __init__(self, weights_path="models/meta/dinov3_vits16_pretrain_lvd.pth", model_size="vits16",
-                 lora_repo="F1nnSBK/lunar-dinov3-lora", use_adapter=False, device=None):
-        super().__init__()
-        self.model_size = model_size
-        self.use_adapter = use_adapter
-        if device is None:
-            device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = torch.device(device)
-        print(f"Loading DINOv3 backbone: dinov3_{model_size} (local weights: {weights_path}) on {self.device}...")
-        
-        try:
-            self.backbone = torch.hub.load("facebookresearch/dinov3", f"dinov3_{model_size}", pretrained=False)
-            state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
-            if 'model' in state_dict:
-                state_dict = state_dict['model']
-            self.backbone.load_state_dict(state_dict, strict=True)
-            self.backbone.to(self.device)
-            self.backbone.eval()
-        except Exception as e:
-            print(f"Error while loading base model: {e}")
-            raise
-        
-        if use_adapter:
-            print(f"[Mode B] Loading Lunar LoRA adapter from {lora_repo}...")
-            lora_config = LoraConfig(
-                r=32,
-                lora_alpha=32,
-                target_modules=["qkv", "proj", "fc1", "fc2"],
-                lora_dropout=0.1,
-                bias="none"
-            )
+# Define DinoExtractor wrapper only if torch is available
+if HAS_TORCH:
+    class DinoExtractor(nn.Module):
+        def __init__(self, weights_path="models/meta/dinov3_vits16_pretrain_lvd.pth", model_size="vits16",
+                     lora_repo="F1nnSBK/lunar-dinov3-lora", use_adapter=False, device=None):
+            super().__init__()
+            self.model_size = model_size
+            self.use_adapter = use_adapter
+            if device is None:
+                device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+            self.device = torch.device(device)
+            print(f"Loading DINOv3 backbone: dinov3_{model_size} (local weights: {weights_path}) on {self.device}...")
+            
             try:
-                self.model = PeftModel.from_pretrained(
-                    self.backbone,
-                    lora_repo,
-                    config=lora_config
-                )
-                self.model.to(self.device)
-                self.model.eval()
+                self.backbone = torch.hub.load("facebookresearch/dinov3", f"dinov3_{model_size}", pretrained=False)
+                state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
+                if 'model' in state_dict:
+                    state_dict = state_dict['model']
+                self.backbone.load_state_dict(state_dict, strict=True)
+                self.backbone.to(self.device)
+                self.backbone.eval()
             except Exception as e:
-                print(f"Error while loading LoRA adapter: {e}")
+                print(f"Error while loading base model: {e}")
                 raise
-        else:
-            print(f"[Mode A] Running naked DINOv3 backbone (no LoRA adapter). Optimal for MNIST system verification on {self.device}.")
-            self.model = self.backbone
+            
+            if use_adapter:
+                print(f"[Mode B] Loading Lunar LoRA adapter from {lora_repo}...")
+                lora_config = LoraConfig(
+                    r=32,
+                    lora_alpha=32,
+                    target_modules=["qkv", "proj", "fc1", "fc2"],
+                    lora_dropout=0.1,
+                    bias="none"
+                )
+                try:
+                    self.model = PeftModel.from_pretrained(
+                        self.backbone,
+                        lora_repo,
+                        config=lora_config
+                    )
+                    self.model.to(self.device)
+                    self.model.eval()
+                except Exception as e:
+                    print(f"Error while loading LoRA adapter: {e}")
+                    raise
+            else:
+                print(f"[Mode A] Running naked DINOv3 backbone (no LoRA adapter). Optimal for MNIST system verification on {self.device}.")
+                self.model = self.backbone
+            
+        def forward(self, x):
+            return self.model(x.to(self.device))
+
+    def get_feature_extractor(use_adapter=False):
+        from torchvision import transforms
+        device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+        extractor = DinoExtractor(use_adapter=use_adapter, device=device)
         
-    def forward(self, x):
-        return self.model(x.to(self.device))
-
-def get_feature_extractor(use_adapter=False):
-    import torch
-    from torchvision import transforms
-    
-    device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-    extractor = DinoExtractor(use_adapter=use_adapter, device=device)
-    
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    
-    def extract(images):
-        batch = torch.stack([transform(img.convert("RGB")) for img in images])
-        with torch.no_grad():
-            embeddings = extractor(batch)
-        return embeddings.cpu().numpy()
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
         
-    return extract
-
-def precondition_and_quantize(embeddings):
-    # L2-normalize
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    embeddings_norm = embeddings / norms
-    
-    # Apply diagonal sign preconditioning
-    embeddings_sign = embeddings_norm * D
-    
-    # Apply Hadamard transformation H384 / sqrt(384)
-    embeddings_precond = np.dot(embeddings_sign, H384.T) / np.sqrt(DIMENSION)
-    
-    # 1-bit quantization (val >= 0 -> 1, val < 0 -> 0)
-    bits = (embeddings_precond >= 0).astype(np.uint8)
-    return bits
-
-def pack_bits(bits_array):
-    # bits_array shape: (N, 384)
-    # Output byte array: (N, 48)
-    n = bits_array.shape[0]
-    packed = np.zeros((n, 48), dtype=np.uint8)
-    for i in range(48):
-        byte_slice = bits_array[:, i*8 : (i+1)*8]
-        val = np.zeros(n, dtype=np.uint8)
-        for b in range(8):
-            val = (val << 1) | byte_slice[:, b]
-        packed[:, i] = val
-    return packed
+        def extract(images):
+            batch = torch.stack([transform(img.convert("RGB")) for img in images])
+            with torch.no_grad():
+                embeddings = extractor(batch)
+            return embeddings.cpu().numpy()
+            
+        weights = np.eye(DIMENSION, dtype=np.float32)
+        if use_adapter:
+            try:
+                w_qkv = extractor.model.base_model.model.blocks[0].attn.qkv.weight.detach().cpu().numpy()
+                weights = w_qkv[:DIMENSION, :DIMENSION].astype(np.float32)
+            except Exception:
+                q, r = np.linalg.qr(np.random.normal(size=(DIMENSION, DIMENSION)))
+                weights = q.astype(np.float32)
+                
+        return extract, weights
 
 def main():
-    # 1. Load dataset (MNIST via torchvision)
-    print("Loading MNIST dataset for real-data verification...")
-    try:
-        from torchvision import datasets
-        train_dataset = datasets.MNIST(root='./data', train=True, download=True)
-        images = [train_dataset[i][0] for i in range(10000)]
-        labels = np.array([train_dataset[i][1] for i in range(10000)], dtype=np.int32)
-    except Exception as e:
-        print(f"Failed to load MNIST via torchvision: {e}. Generating synthetic digits...")
-        # Create synthetic images if offline/failed
-        images = []
-        labels = []
-        for i in range(10000):
-            # Create a 28x28 mock digit image (circle/lines based on index)
-            img = Image.new("L", (28, 28), 0)
-            digit = i % 10
-            # Draw something simple depending on digit
-            from PIL import ImageDraw
-            draw = ImageDraw.Draw(img)
-            if digit == 7:
-                draw.line([(5, 5), (23, 5)], fill=255, width=3)
-                draw.line([(23, 5), (10, 23)], fill=255, width=3)
-            elif digit == 1:
-                draw.line([(14, 5), (14, 23)], fill=255, width=3)
-            else:
-                draw.ellipse([(5, 5), (23, 23)], outline=255, width=2)
-            images.append(img)
-            labels.append(digit)
-        labels = np.array(labels, dtype=np.int32)
+    use_torch = HAS_TORCH
+    if use_torch:
+        print("Loading real lunar dataset for Mode B verification...")
+        try:
+            import glob
+            train_pits_path = "/Users/finnhertsch/projects/luna_hole/data/processed/dataset/train/pits/*.png"
+            train_negs_path = "/Users/finnhertsch/projects/luna_hole/data/processed/dataset/train/negatives/*.png"
+            
+            pit_files = sorted(glob.glob(train_pits_path))
+            neg_files = sorted(glob.glob(train_negs_path))
+            
+            print(f"Found {len(pit_files)} train pits and {len(neg_files)} train negatives.")
+            
+            images = []
+            labels = []
+            
+            # Load pits (label = 1)
+            for f in pit_files:
+                images.append(Image.open(f))
+                labels.append(1)
+                
+            # Load negatives (label = 0)
+            for f in neg_files:
+                images.append(Image.open(f))
+                labels.append(0)
+                
+            labels = np.array(labels, dtype=np.int32)
+        except Exception as e:
+            print(f"Failed to load lunar dataset: {e}. Falling back to synthetic generators...")
+            use_torch = False
 
-    # 2. Extract embeddings
-    # Mode A: use_adapter=False -> naked DINOv3 backbone for maximum MNIST class separation.
-    # Mode B: use_adapter=True  -> DINOv3 + Lunar LoRA for real NAC lunar tile ingestion.
-    extract_fn = get_feature_extractor(use_adapter=False)
-    print("Extracting features for 10,000 unique images (Mode A: DINOv3 backbone, no LoRA)...")
+    if not use_torch:
+        print("Running in high-fidelity synthetic fallback mode (simulating Matryoshka-structured visual embeddings)...")
+        # Generate synthetic 10,000 base vectors
+        embeddings = np.random.normal(0.0, 1.0, size=(10000, DIMENSION)).astype(np.float32)
+        labels = np.random.randint(0, 2, size=10000, dtype=np.int32)
+        
+        # Structure target class 1 to have high similarity (simulating cave morphologies)
+        pits_mask = (labels == 1)
+        embeddings[pits_mask, :64] += 0.85
+        
+        # Generate target orthogonal weights matrix W
+        q, r = np.linalg.qr(np.random.normal(size=(DIMENSION, DIMENSION)))
+        weights = q.astype(np.float32)
+    else:
+        # Extract embeddings via DINOv3 model with Lunar LoRA adapter (Mode B)
+        extract_fn, weights = get_feature_extractor(use_adapter=True)
+        print(f"Extracting features for {len(images)} unique images...")
+        batch_size = 250
+        embeddings_list = []
+        for idx in range(0, len(images), batch_size):
+            batch_imgs = images[idx : idx + batch_size]
+            batch_embs = extract_fn(batch_imgs)
+            embeddings_list.append(batch_embs)
+        embeddings = np.vstack(embeddings_list)
+        print(f"Features extracted. Shape: {embeddings.shape}")
+
+    # L2-Normalize
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    embeddings = embeddings / norms
     
-    # Process in batches to save memory
-    batch_size = 1000
-    embeddings_list = []
-    for idx in range(0, len(images), batch_size):
-        batch_imgs = images[idx : idx + batch_size]
-        batch_embs = extract_fn(batch_imgs)
-        embeddings_list.append(batch_embs)
-    embeddings = np.vstack(embeddings_list)
-    print(f"Features extracted. Shape: {embeddings.shape}")
-    
-    # 3. Apply PolarQuant-Hadamard preconditioning & quantization
-    print("Applying PolarQuant-Hadamard preconditioning & 1-bit quantization...")
-    bits = precondition_and_quantize(embeddings)
-    packed_vectors = pack_bits(bits)
-    
-    # 4. Replicate to 1,000,000 records
+    # Replicate to 1,000,000 records
     print(f"Replicating to {NUM_RECORDS:,} records...")
     tile_indices = np.arange(NUM_RECORDS)
-    source_indices = tile_indices % 10000
+    source_indices = tile_indices % len(embeddings)
     
-    # Sequential Z-order Z-IDs and packed vectors
-    db_packed_vectors = packed_vectors[source_indices]
+    db_vectors = embeddings[source_indices].astype(np.float32)
     db_labels = labels[source_indices]
     
-    # 5. Write the PLAN binary file
-    print(f"Writing binary index to {DB_FILE}...")
-    magic = b"PLAN"
-    planet_id = 1  # Moon
-    header_data = struct.pack("<BQQ", planet_id, NUM_RECORDS, 1737400)
-    padding = b"\x00" * 43
-    header = magic + header_data + padding
-    assert len(header) == 64
-    
-    # Build 64-byte records
-    records = np.zeros((NUM_RECORDS, BYTES_PER_RECORD), dtype=np.uint8)
-    
-    # Bytes 0-7: Sequential tileId (long)
-    ids = np.arange(NUM_RECORDS, dtype=np.uint64)
-    records[:, 0:8] = ids.view(np.uint8).reshape(-1, 8)
-    
-    # Bytes 8-55: Packed vector (48 bytes)
-    records[:, 8:56] = db_packed_vectors
-    
-    # Bytes 56-63: Metadata padding (8 bytes) containing the label (for easy verification)
-    metadata = db_labels.astype(np.uint64)
-    records[:, 56:64] = metadata.view(np.uint8).reshape(-1, 8)
-    
-    with open(DB_FILE, "wb") as f:
-        f.write(header)
-        f.write(records.tobytes())
+    # Resolve native library path
+    import platform
+    if platform.system() == "Darwin":
+        so_paths = [
+            "./target/libpithos.dylib",
+            "./build-output/libpithos.dylib",
+            "./libpithos.dylib",
+            "./target/libpithos.so",
+            "./build-output/libpithos.so",
+        ]
+    else:
+        so_paths = [
+            "./build-output/libpithos.so",
+            "./libpithos.so",
+            "./target/libpithos.so",
+        ]
+    lib_path = None
+    for p in so_paths:
+        if os.path.exists(p):
+            lib_path = p
+            break
+    if not lib_path:
+        print("[Error] Pithos native library not found.", file=sys.stderr)
+        sys.exit(1)
         
-    print(f"Database successfully generated: {DB_FILE}")
+    engine = PithosEngine(lib_path)
     
-    # Save target metadata for the verification phase
+    # Compile raw float vectors into Pithos database files
+    print(f"Compiling Pithos multi-tier database files for {NUM_RECORDS:,} records...")
+    ids = np.arange(NUM_RECORDS, dtype=np.int64)
+    status = engine.compile_index_file(DB_FILE, 1, 1737400, DIMENSION, TIERS, ids, db_vectors)
+    engine.close()
+    
+    if status != 0:
+        print(f"[Error] Compilation failed with code: {status}", file=sys.stderr)
+        sys.exit(1)
+        
+    print(f"Database successfully generated under base name: {DB_FILE}")
+    
+    # Save target metadata and weights for verification phase
     np.save("db_labels.npy", db_labels)
-    # Save the raw embeddings subset of '7's for query generation
-    sevens_indices = np.where(labels == 7)[0]
-    np.save("raw_sevens.npy", embeddings[sevens_indices])
+    np.save("weights.npy", weights)
+    np.save("db_vectors.npy", db_vectors)
+    
+    if use_torch:
+        # Save the raw embeddings of test pits for query generation
+        test_pits_path = "/Users/finnhertsch/projects/luna_hole/data/processed/dataset/test/pits/*.png"
+        test_pit_files = sorted(glob.glob(test_pits_path))
+        test_pit_images = [Image.open(f) for f in test_pit_files]
+        print(f"Extracting features for {len(test_pit_images)} test pits for queries...")
+        test_pit_embeddings = extract_fn(test_pit_images)
+        q_norms = np.linalg.norm(test_pit_embeddings, axis=1, keepdims=True)
+        q_norms[q_norms == 0] = 1.0
+        test_pit_embeddings = test_pit_embeddings / q_norms
+        np.save("raw_pits.npy", test_pit_embeddings)
+    else:
+        # Fallback raw pits
+        np.save("raw_pits.npy", embeddings[labels == 1])
+    
+    # Save first 10,000 raw float vectors for distance verification
+    np.save("db_vectors_subset.npy", db_vectors[:10000])
 
 if __name__ == "__main__":
     main()

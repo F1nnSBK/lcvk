@@ -3,12 +3,14 @@ import sys
 import time
 import argparse
 import numpy as np
-from benchmark import LcvkEngine
+from benchmark import PithosEngine
 
-DB_FILE = "lunar_real_data.bin"
+DB_FILE = "lunar_real_data"
+DIMENSION = 384
+TIERS = np.array([64, 128, 256, 384], dtype=np.int32)
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="LCVK Real Data Verification")
+    parser = argparse.ArgumentParser(description="Pithos Real Data Verification")
     parser.add_argument("--trace", action="store_true", help="Enable deep execution profiling with step-by-step timestamps")
     return parser.parse_args()
 
@@ -57,9 +59,49 @@ def print_performance_table(duration_p1: float, duration_p2: float, trace_data: 
     print_row("Total Pipeline Execution Time", format_duration(total_time), "100.0%")
     print(f"└{'─' * w1}┴{'─' * w2}┴{'─' * w3}┘\n")
 
-def hamming_distance_matrix(queries, db_vectors):
-    q_u64 = queries.view(np.uint64)
-    db_u64 = db_vectors.view(np.uint64)
+def get_java_random_signs(dimension, seed=42):
+    current_seed = (seed ^ 0x5DEECE66D) & ((1 << 48) - 1)
+    signs = []
+    for _ in range(dimension):
+        current_seed = (current_seed * 0x5DEECE66D + 0xB) & ((1 << 48) - 1)
+        val = current_seed >> 47
+        signs.append(1.0 if val != 0 else -1.0)
+    return np.array(signs, dtype=np.float32)
+
+def get_hadamard_matrix(n):
+    if n == 1:
+        return np.array([[1.0]], dtype=np.float32)
+    H_prev = get_hadamard_matrix(n // 2)
+    return np.block([[H_prev, H_prev], [H_prev, -H_prev]]) / np.sqrt(2.0)
+
+def transform_and_binarize(vectors, dimension=384):
+    signs = get_java_random_signs(dimension)
+    z = vectors * signs
+    
+    start = 0
+    for limit in [64, 128, 256, 384]:
+        width = limit - start
+        H = get_hadamard_matrix(width)
+        z[:, start:limit] = z[:, start:limit] @ H.T
+        start = limit
+        
+    bits = (z >= 0.0).astype(np.uint8)
+    return bits
+
+def pack_bits(bits_array):
+    n = bits_array.shape[0]
+    packed = np.zeros((n, 48), dtype=np.uint8)
+    for i in range(48):
+        byte_slice = bits_array[:, i*8 : (i+1)*8]
+        val = np.zeros(n, dtype=np.uint8)
+        for b in range(8):
+            val = (val << 1) | byte_slice[:, b]
+        packed[:, i] = val
+    return packed
+
+def popcount_matrix(queries_packed, db_packed):
+    q_u64 = queries_packed.view(np.uint64)
+    db_u64 = db_packed.view(np.uint64)
     
     dists = np.zeros((q_u64.shape[0], db_u64.shape[0]), dtype=np.int32)
     for q_idx in range(q_u64.shape[0]):
@@ -81,57 +123,60 @@ def main():
     
     # 1. Load queries, labels, and database for analysis
     print("Loading queries, labels, and database vectors...")
-    if not os.path.exists("queries.npy") or not os.path.exists("db_labels.npy"):
+    if not os.path.exists("queries.npy") or not os.path.exists("db_labels.npy") or not os.path.exists("db_vectors_subset.npy"):
         print("[Error] Files missing. Please run ingest_pipeline.py and query_generator.py.")
         sys.exit(1)
         
     t_load_start = time.perf_counter()
-    queries = np.load("queries.npy")       # shape (278, 6)
-    db_labels = np.load("db_labels.npy")   # shape (1000000,)
+    queries = np.load("queries.npy")               # shape (278, 384)
+    db_labels = np.load("db_labels.npy")           # shape (1000000,)
+    db_vectors_subset = np.load("db_vectors_subset.npy") # shape (10000, 384)
+    weights = np.load("weights.npy")               # shape (384, 384)
     
-    # Read first 10,000 records from DB file for distance analysis
-    with open(DB_FILE, "rb") as f:
-        f.seek(64) # skip header
-        records_raw = f.read(10000 * 64)
-    records_arr = np.frombuffer(records_raw, dtype=np.uint8).reshape(-1, 64)
-    db_vectors = records_arr[:, 8:56].copy().view(np.int64) # shape (10000, 6)
     db_labels_subset = db_labels[:10000]
     
     if trace_data is not None:
         trace_data["p1_io_loading"] = time.perf_counter() - t_load_start
         
-    # Compute pairwise Hamming distances for the first 50 queries against 10000 DB records
+    # Compute transformed binarized vectors in Python to analyze distance distribution
     print("Analyzing Hamming distance distribution...")
     t_dist_start = time.perf_counter()
-    dists = hamming_distance_matrix(queries[:50], db_vectors) # shape (50, 10000)
     
-    is_seven = (db_labels_subset == 7)
+    q_bits = transform_and_binarize(queries[:50], DIMENSION)
+    q_packed = pack_bits(q_bits)
     
-    dists_to_sevens = dists[:, is_seven]
-    dists_to_others = dists[:, ~is_seven]
+    db_bits = transform_and_binarize(db_vectors_subset, DIMENSION)
+    db_packed = pack_bits(db_bits)
     
-    mean_sevens = np.mean(dists_to_sevens)
-    std_sevens = np.std(dists_to_sevens)
-    min_sevens = np.min(dists_to_sevens)
-    max_sevens = np.max(dists_to_sevens)
+    dists = popcount_matrix(q_packed, db_packed) # shape (50, 10000)
     
-    mean_others = np.mean(dists_to_others)
-    std_others = np.std(dists_to_others)
-    min_others = np.min(dists_to_others)
-    max_others = np.max(dists_to_others)
+    is_pit = (db_labels_subset == 1)
+    
+    dists_to_pits = dists[:, is_pit]
+    dists_to_negatives = dists[:, ~is_pit]
+    
+    mean_pits = np.mean(dists_to_pits)
+    std_pits = np.std(dists_to_pits)
+    min_pits = np.min(dists_to_pits)
+    max_pits = np.max(dists_to_pits)
+    
+    mean_others = np.mean(dists_to_negatives)
+    std_others = np.std(dists_to_negatives)
+    min_others = np.min(dists_to_negatives)
+    max_others = np.max(dists_to_negatives)
     
     if trace_data is not None:
         trace_data["p1_cpu_distance_analysis"] = time.perf_counter() - t_dist_start
         
     print("\n" + "="*80)
-    print("                 LCVK HAMMING DISTANCE DISTRIBUTION REPORT              ")
+    print("                 PITHOS HAMMING DISTANCE DISTRIBUTION REPORT            ")
     print("========================================================================")
-    print(f" Query Digit vs Target Digit (7):")
-    print(f"  - Mean Distance           : {mean_sevens:.2f} bits")
-    print(f"  - Std Dev                 : {std_sevens:.2f} bits")
-    print(f"  - Range (Min / Max)       : {min_sevens} / {max_sevens} bits")
+    print(f" Target Class (Lunar Pit/Cave Entrance):")
+    print(f"  - Mean Distance           : {mean_pits:.2f} bits")
+    print(f"  - Std Dev                 : {std_pits:.2f} bits")
+    print(f"  - Range (Min / Max)       : {min_pits} / {max_pits} bits")
     print("------------------------------------------------------------------------")
-    print(f" Query Digit vs Other Digits (0-6, 8-9):")
+    print(f" Background Class (Flat Mondgelände/Terrain):")
     print(f"  - Mean Distance           : {mean_others:.2f} bits")
     print(f"  - Std Dev                 : {std_others:.2f} bits")
     print(f"  - Range (Min / Max)       : {min_others} / {max_others} bits")
@@ -141,11 +186,11 @@ def main():
     t_opt_start = time.perf_counter()
     best_f1 = 0
     best_threshold = 0
-    for T in range(int(min_sevens), int(max_others)):
-        is_resonant_subset = (np.sum(dists <= T, axis=0) >= 7) # popcount >= 7
-        tp = np.sum(is_resonant_subset & is_seven)
-        fp = np.sum(is_resonant_subset & ~is_seven)
-        fn = np.sum(~is_resonant_subset & is_seven)
+    for T in range(int(min_pits), int(max_others)):
+        is_resonant_subset = (np.sum(dists <= T, axis=0) >= 5)
+        tp = np.sum(is_resonant_subset & is_pit)
+        fp = np.sum(is_resonant_subset & ~is_pit)
+        fn = np.sum(~is_resonant_subset & is_pit)
         
         prec = tp / (tp + fp) if (tp + fp) > 0 else 0
         rec = tp / (tp + fn) if (tp + fn) > 0 else 0
@@ -169,17 +214,17 @@ def main():
     import platform
     if platform.system() == "Darwin":
         so_paths = [
-            "./target/lunar_core.dylib",
-            "./build-output/liblunar_core.dylib",
-            "./liblunar_core.dylib",
-            "./target/lunar_core.so",
-            "./build-output/liblunar_core.so",
+            "./target/libpithos.dylib",
+            "./build-output/libpithos.dylib",
+            "./libpithos.dylib",
+            "./target/libpithos.so",
+            "./build-output/libpithos.so",
         ]
     else:
         so_paths = [
-            "./build-output/liblunar_core.so",
-            "./liblunar_core.so",
-            "./target/lunar_core.so",
+            "./build-output/libpithos.so",
+            "./libpithos.so",
+            "./target/libpithos.so",
         ]
     
     lib_path = None
@@ -189,12 +234,14 @@ def main():
             break
             
     if not lib_path:
-        print("[Error] LCVK native library not found.")
+        print("[Error] Pithos native library not found.")
         sys.exit(1)
         
     t_engine_start = time.perf_counter()
-    engine = LcvkEngine(lib_path)
-    status = engine.load_index("lunar_real", DB_FILE)
+    engine = PithosEngine(lib_path)
+    
+    # Load index supplying the weights matrix for SVD energy calculation
+    status = engine.load_index("lunar_real", DB_FILE, weights, DIMENSION)
     if status != 0:
         print(f"[Error] Failed to load index. Code: {status}")
         sys.exit(1)
@@ -225,13 +272,13 @@ def main():
     bit_counts = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
     mask_popcounts = bit_counts[voting_mask]
     
-    is_resonant = (mask_popcounts >= 7)
-    is_seven = (db_labels == 7)
+    is_resonant = (mask_popcounts >= 5)
+    is_pit = (db_labels == 1)
     
-    tp = np.sum(is_resonant & is_seven)
-    fp = np.sum(is_resonant & ~is_seven)
-    fn = np.sum(~is_resonant & is_seven)
-    tn = np.sum(~is_resonant & ~is_seven)
+    tp = np.sum(is_resonant & is_pit)
+    fp = np.sum(is_resonant & ~is_pit)
+    fn = np.sum(~is_resonant & is_pit)
+    tn = np.sum(~is_resonant & ~is_pit)
     
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -241,11 +288,11 @@ def main():
         trace_data["p2_metrics_computation"] = time.perf_counter() - t_metrics_start
         
     print("\n" + "="*80)
-    print("                 LCVK REAL-DATA CLASSIFICATION METRICS                  ")
+    print("                 PITHOS REAL-DATA CLASSIFICATION METRICS                ")
     print("========================================================================")
-    print(f" Target Digit               : 7 (Lunar Cave Entrance Anchor)")
+    print(f" Target Class               : Lunar Pit/Cave Entrance Anchor")
     print(f" Total Database Records     : {total_records:,}")
-    print(f" Actual Target Count ('7's) : {np.sum(is_seven):,}")
+    print(f" Actual Target Count (Pits) : {np.sum(is_pit):,}")
     print(f" Resonant Matches (Found)   : {resonant_count:,}")
     print("------------------------------------------------------------------------")
     print(f" Confusion Matrix")
@@ -264,9 +311,9 @@ def main():
     
     engine.close()
     
-    # Save values to lcvk_metrics.json
+    # Save values to pithos_metrics.json
     import json
-    metrics_path = "lcvk_metrics.json"
+    metrics_path = "pithos_metrics.json"
     metrics_data = {}
     if os.path.exists(metrics_path):
         try:
@@ -276,11 +323,12 @@ def main():
             pass
             
     metrics_data.update({
-        "mu_target": float(mean_sevens),
-        "std_target": float(std_sevens),
+        "mu_target": float(mean_pits),
+        "std_target": float(std_pits),
         "mu_other": float(mean_others),
         "std_other": float(std_others),
-        "threshold": int(best_threshold)
+        "threshold": int(best_threshold),
+        "best_mvps": float(throughput_mvps)
     })
     
     with open(metrics_path, "w") as f:
@@ -294,10 +342,8 @@ def main():
     except Exception as e:
         print(f"Warning: Could not regenerate distribution plot ({e})")
         
-    # Clean up files
-    for f in [DB_FILE, "queries.npy", "families.npy", "thresholds.npy", "db_labels.npy", "raw_sevens.npy"]:
-        if os.path.exists(f):
-            os.remove(f)
+    # Keep multi-tier files and temp files for analysis and subsequent queries
+    pass
             
     print_performance_table(duration_p1, duration_p2, trace_data)
 

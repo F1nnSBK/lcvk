@@ -21,8 +21,8 @@ CONTAINER_ID=$(docker create vectordb-builder)
 mkdir -p build-output
 
 # Copy files from docker container to host
-docker cp "${CONTAINER_ID}:/build/target/lunar_core.so" ./build-output/liblunar_core.so
-docker cp "${CONTAINER_ID}:/build/target/lunar_core.h" ./build-output/
+docker cp "${CONTAINER_ID}:/build/target/pithos.so" ./build-output/libpithos.so
+docker cp "${CONTAINER_ID}:/build/target/pithos.h" ./build-output/
 docker cp "${CONTAINER_ID}:/build/target/graal_isolate.h" ./build-output/
 
 # Clean up the container

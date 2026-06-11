@@ -1,48 +1,44 @@
+import os
+import sys
 import numpy as np
-from ingest_pipeline import precondition_and_quantize, pack_bits, DIMENSION, DinoExtractor
 
 def main():
-    # Load raw embeddings of sevens saved by ingest_pipeline.py
-    if not os.path.exists("raw_sevens.npy"):
-        print("[Error] raw_sevens.npy not found. Please run ingest_pipeline.py first.")
+    # Load raw embeddings of pits saved by ingest_pipeline.py
+    if not os.path.exists("raw_pits.npy"):
+        print("[Error] raw_pits.npy not found. Please run ingest_pipeline.py first.")
         sys.exit(1)
         
-    raw_sevens = np.load("raw_sevens.npy")
-    print(f"Loaded {raw_sevens.shape[0]} raw embeddings of digit '7'.")
+    raw_pits = np.load("raw_pits.npy")
+    print(f"Loaded {raw_pits.shape[0]} raw embeddings of lunar pits.")
     
     # Select 278 queries
     num_queries = 278
-    if raw_sevens.shape[0] < num_queries:
-        print(f"[Warning] Only found {raw_sevens.shape[0]} sevens. Repeating to reach {num_queries}.")
-        indices = np.arange(num_queries) % raw_sevens.shape[0]
-        queries_raw = raw_sevens[indices]
+    if raw_pits.shape[0] < num_queries:
+        print(f"[Warning] Only found {raw_pits.shape[0]} pits. Repeating to reach {num_queries}.")
+        indices = np.arange(num_queries) % raw_pits.shape[0]
+        queries_raw = raw_pits[indices]
     else:
-        queries_raw = raw_sevens[:num_queries]
+        queries_raw = raw_pits[:num_queries]
         
-    # Precondition and binarize queries using the exact same PolarQuant-Hadamard logic
-    bits = precondition_and_quantize(queries_raw)
-    packed_queries = pack_bits(bits)  # shape (278, 48)
-    
-    # Convert packed queries to 6 longs per query (dtype=np.int64)
-    # 48 bytes is exactly 6 int64s. We can use .view(np.int64)
-    queries_long = packed_queries.view(np.int64) # shape (278, 6)
+    # Save float32 queries directly for Pithos
+    queries_float = queries_raw.astype(np.float32)
     
     # Partition queries into 8 families (0 to 7)
     families = np.arange(num_queries, dtype=np.int32) % 8
+    np.random.seed(42)
+    np.random.shuffle(families)
     
     # Set distance threshold for each family.
-    # For DINOv3-LoRA, the optimal Hamming threshold is expected to be under 50 bits.
-    thresholds = np.full(num_queries, 45, dtype=np.int32)
+    # For DINOv3 + Lunar LoRA, target threshold is gestaucht to around 40 bits.
+    thresholds = np.full(num_queries, 40, dtype=np.int32)
     
     # Save arrays for the verification phase
-    np.save("queries.npy", queries_long)
+    np.save("queries.npy", queries_float)
     np.save("families.npy", families)
     np.save("thresholds.npy", thresholds)
     
-    print(f"Generated {num_queries} queries partitioned across 8 families using DINOv3 pipeline.")
-    print("Queries packed and saved successfully.")
+    print(f"Generated {num_queries} queries partitioned across 8 families.")
+    print("Queries saved successfully as float arrays.")
 
 if __name__ == "__main__":
-    import os
-    import sys
     main()
