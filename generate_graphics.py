@@ -369,6 +369,30 @@ def update_readme():
         lines.append("This FFI crossing overhead of < 0.2 microseconds is tiny, explaining why Pithos matches/beats native C++ FAISS even for low-dimensional single-query lookups.")
         lines.append("")
 
+    # Append Candidate Workload Reduction (Elbow Curve) if available
+    cand_path = "candidate_metrics.json"
+    if os.path.exists(cand_path):
+        with open(cand_path, "r") as f:
+            cand_data = json.load(f)
+        results = cand_data.get("results", [])
+        if results:
+            lines.append("### 8. Downstream Pipeline Workload Reduction (Elbow Curve)")
+            lines.append("")
+            lines.append("We evaluate Pithos as a **first-stage candidate generator** for heavy downstream neural classifiers (e.g. Mask R-CNN). The table below sweeps candidate list size ($K$) against target recall (capturing the Top-10 exact ground-truth nearest neighbor lunar pits out of 100,000 database items):")
+            lines.append("")
+            lines.append("| Candidates (K) | Workload Reduction (%) | Recall of Top-10 Pits (%) | Pithos Latency (ms) |")
+            lines.append("|---:|---:|---:|---:|")
+            for r in results:
+                lines.append(
+                    f"| {r['k_candidate']} "
+                    f"| {r['workload_reduction']:.3%} "
+                    f"| {r['recall']:.2%} "
+                    f"| {r['avg_latency_ms']:.4f} ms |"
+                )
+            lines.append("")
+            lines.append("This dual-axis relationship demonstrates the 'Elbow' trade-off: retrieving 500 candidates provides a **99.50% workload reduction** for the downstream CNN while retaining **68.35%** of target lunar pits in under 0.7 milliseconds.")
+            lines.append("")
+
     lines.append("### Visual Charts (Vector Anomaly Distribution & Throughput Analysis)")
     lines.append("")
     lines.append("#### Hamming Distance Distribution")
@@ -379,6 +403,9 @@ def update_readme():
     lines.append("")
     lines.append("#### Performance Crossover Curve")
     lines.append("![Performance Crossover Curve](assets/crossover_curve.png)")
+    lines.append("")
+    lines.append("#### Workload Reduction vs. Target Recall Elbow Curve")
+    lines.append("![Workload Reduction vs. Target Recall](assets/candidate_tradeoff.png)")
 
     lines.append("<!-- BENCHMARK_METRICS_END -->")
     new_block = "\n".join(lines)

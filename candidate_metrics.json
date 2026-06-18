@@ -1,0 +1,52 @@
+{
+    "results": [
+        {
+            "k_candidate": 10,
+            "workload_reduction": 0.9999,
+            "recall": 0.29856115107913667,
+            "avg_latency_ms": 0.042385039561601494
+        },
+        {
+            "k_candidate": 50,
+            "workload_reduction": 0.9995,
+            "recall": 0.29856115107913667,
+            "avg_latency_ms": 0.05668510072328579
+        },
+        {
+            "k_candidate": 100,
+            "workload_reduction": 0.999,
+            "recall": 0.4712230215827338,
+            "avg_latency_ms": 0.10626783453209891
+        },
+        {
+            "k_candidate": 200,
+            "workload_reduction": 0.998,
+            "recall": 0.5575539568345323,
+            "avg_latency_ms": 0.1791877985727578
+        },
+        {
+            "k_candidate": 500,
+            "workload_reduction": 0.995,
+            "recall": 0.6834532374100719,
+            "avg_latency_ms": 0.6651019172730609
+        },
+        {
+            "k_candidate": 1000,
+            "workload_reduction": 0.99,
+            "recall": 0.7230215827338129,
+            "avg_latency_ms": 2.1548408273289863
+        },
+        {
+            "k_candidate": 2000,
+            "workload_reduction": 0.98,
+            "recall": 0.7410071942446043,
+            "avg_latency_ms": 6.791840827331431
+        },
+        {
+            "k_candidate": 5000,
+            "workload_reduction": 0.95,
+            "recall": 0.7410071942446043,
+            "avg_latency_ms": 28.514934201444152
+        }
+    ]
+}

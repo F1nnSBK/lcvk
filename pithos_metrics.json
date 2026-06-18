@@ -4,9 +4,9 @@
   "mu_other": 197.31954011741684,
   "std_other": 75.00762327717537,
   "threshold": 49,
-  "best_mvps": 673.6291163257331,
-  "best_time_ms": 41.26899999755551,
-  "best_latency_us": 148.44964027897666,
-  "peak_mem_mb": 936.71875,
+  "best_mvps": 705.494226629345,
+  "best_time_ms": 39.404999999533175,
+  "best_latency_us": 141.74460431486753,
+  "peak_mem_mb": 936.609375,
   "canary_status": "PASSED"
 }

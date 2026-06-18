@@ -5,14 +5,14 @@
   "num_families": 8,
   "threshold": 40,
   "faiss_emulated": {
-    "time_ms": 710.44,
-    "mvps": 39.13,
+    "time_ms": 708.15,
+    "mvps": 39.26,
     "resonant_records": 89120
   },
   "pithos_native": {
-    "time_ms": 8.38,
-    "mvps": 3317.9,
+    "time_ms": 8.41,
+    "mvps": 3306.96,
     "resonant_records": 21980
   },
-  "speedup": 84.8
+  "speedup": 84.2
 }

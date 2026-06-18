@@ -1,10 +1,10 @@
 {
-  "faiss_mvps": 93.75862904025257,
-  "sequential_mvps": 5.630760617018972,
-  "faiss_latency_us": 1066.5684964001327,
-  "sequential_latency_us": 17759.590009518433,
-  "faiss_time_ms": 296.5060419992369,
-  "sequential_time_ms": 4937.1660226461245,
-  "faiss_mem_mb": 793.421875,
-  "sequential_mem_mb": 796.46875
+  "faiss_mvps": 100.12849222895662,
+  "sequential_mvps": 5.533268782145825,
+  "faiss_latency_us": 998.7167266170073,
+  "sequential_latency_us": 18072.499988193158,
+  "faiss_time_ms": 277.64324999952805,
+  "sequential_time_ms": 5024.154996717698,
+  "faiss_mem_mb": 792.953125,
+  "sequential_mem_mb": 795.953125
 }
