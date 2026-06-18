@@ -1,0 +1,42 @@
+{
+  "dataset": "lunar_real_data",
+  "num_records": 10000,
+  "num_queries": 278,
+  "dimension": 384,
+  "tiers": [
+    64,
+    128,
+    256,
+    384
+  ],
+  "recall_results": [
+    {
+      "k": 1,
+      "recall": 0.1799,
+      "faiss_ms": 20.13,
+      "pithos_ms": 11.6,
+      "speedup": 1.7
+    },
+    {
+      "k": 10,
+      "recall": 0.1853,
+      "faiss_ms": 20.13,
+      "pithos_ms": 11.6,
+      "speedup": 1.7
+    },
+    {
+      "k": 50,
+      "recall": 0.2852,
+      "faiss_ms": 20.13,
+      "pithos_ms": 11.6,
+      "speedup": 1.7
+    },
+    {
+      "k": 100,
+      "recall": 0.3384,
+      "faiss_ms": 20.13,
+      "pithos_ms": 11.6,
+      "speedup": 1.7
+    }
+  ]
+}

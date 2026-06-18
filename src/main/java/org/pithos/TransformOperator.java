@@ -2,12 +2,18 @@ package org.pithos;
 
 import java.util.Arrays;
 import java.util.Random;
+import jdk.incubator.vector.FloatVector;
+import jdk.incubator.vector.VectorSpecies;
+import jdk.incubator.vector.VectorOperators;
 
 /**
- * Handles isometric transformations (Rademacher preconditioning + block Walsh-Hadamard rotation)
+ * Handles isometric transformations (Rademacher preconditioning + block
+ * Walsh-Hadamard rotation)
  * and binarization.
  */
 public class TransformOperator {
+
+    private static final VectorSpecies<Float> SPECIES = FloatVector.SPECIES_PREFERRED;
 
     private final int dimension;
     private final int[] tiers;
@@ -17,8 +23,9 @@ public class TransformOperator {
         this.dimension = dimension;
         this.tiers = tiers;
         this.signs = new float[dimension];
-        
-        // Generate Rademacher signs deterministically using seed 42 (matching Python side)
+
+        // Generate Rademacher signs deterministically using seed 42 (matching Python
+        // side)
         Random rand = new Random(42);
         for (int i = 0; i < dimension; i++) {
             signs[i] = rand.nextBoolean() ? 1.0f : -1.0f;
@@ -43,7 +50,16 @@ public class TransformOperator {
         for (int i = 0; i < D; i++) {
             for (int j = 0; j < D; j++) {
                 float sum = 0.0f;
-                for (int k = 0; k < D0; k++) {
+                int k = 0;
+                int kBound = SPECIES.loopBound(D0);
+                FloatVector vSum = FloatVector.zero(SPECIES);
+                for (; k < kBound; k += SPECIES.length()) {
+                    FloatVector va = FloatVector.fromArray(SPECIES, flatW, i * D0 + k);
+                    FloatVector vb = FloatVector.fromArray(SPECIES, flatW, j * D0 + k);
+                    vSum = va.fma(vb, vSum);
+                }
+                sum = vSum.reduceLanes(VectorOperators.ADD);
+                for (; k < D0; k++) {
                     sum += flatW[i * D0 + k] * flatW[j * D0 + k];
                 }
                 A[i][j] = sum;
@@ -81,7 +97,8 @@ public class TransformOperator {
 
     private static float[] jacobiEigenvalues(float[][] A, int n) {
         float[] d = new float[n];
-        for (int i = 0; i < n; i++) d[i] = A[i][i];
+        for (int i = 0; i < n; i++)
+            d[i] = A[i][i];
 
         int maxIterations = 100;
         for (int iter = 0; iter < maxIterations; iter++) {
@@ -97,7 +114,8 @@ public class TransformOperator {
                 }
             }
 
-            if (maxVal < 1e-6f) break;
+            if (maxVal < 1e-6f)
+                break;
 
             float apq = A[p][q];
             float app = A[p][p];
@@ -105,7 +123,8 @@ public class TransformOperator {
 
             float theta = 0.5f * (aqq - app) / apq;
             float t = (float) (1.0 / (Math.abs(theta) + Math.sqrt(1.0 + theta * theta)));
-            if (theta < 0) t = -t;
+            if (theta < 0)
+                t = -t;
 
             float c = (float) (1.0 / Math.sqrt(1.0 + t * t));
             float s = t * c;
@@ -134,7 +153,8 @@ public class TransformOperator {
     }
 
     /**
-     * Preconditions a vector with Rademacher signs, rotates via block-diagonal Hadamard,
+     * Preconditions a vector with Rademacher signs, rotates via block-diagonal
+     * Hadamard,
      * and binarizes it into a packed long array.
      */
     public long[] transformAndQuantize(float[] x) {
@@ -144,7 +164,14 @@ public class TransformOperator {
 
         // 1. Rademacher Preconditioning (Sign-flip)
         float[] z = new float[dimension];
-        for (int i = 0; i < dimension; i++) {
+        int i = 0;
+        int upperBound = SPECIES.loopBound(dimension);
+        for (; i < upperBound; i += SPECIES.length()) {
+            FloatVector va = FloatVector.fromArray(SPECIES, x, i);
+            FloatVector vb = FloatVector.fromArray(SPECIES, signs, i);
+            va.mul(vb).intoArray(z, i);
+        }
+        for (; i < dimension; i++) {
             z[i] = x[i] * signs[i];
         }
 
@@ -159,10 +186,10 @@ public class TransformOperator {
         // 3. 1-Bit Binarization & Packing into longs (64 bits per long)
         int numLongs = (dimension + 63) / 64;
         long[] packed = new long[numLongs];
-        for (int i = 0; i < dimension; i++) {
-            if (z[i] >= 0.0f) {
-                int longIdx = i / 64;
-                int bitIdx = i % 64;
+        for (int j = 0; j < dimension; j++) {
+            if (z[j] >= 0.0f) {
+                int longIdx = j / 64;
+                int bitIdx = j % 64;
                 packed[longIdx] |= (1L << bitIdx);
             }
         }
@@ -171,7 +198,8 @@ public class TransformOperator {
 
     /**
      * Back-projects a target transformed vector z to raw input space x.
-     * Since H_BD and D_pre are orthogonal/symmetric, back-projecting is self-inverse.
+     * Since H_BD and D_pre are orthogonal/symmetric, back-projecting is
+     * self-inverse.
      */
     public float[] backProject(float[] z) {
         if (z.length != dimension) {
@@ -189,8 +217,15 @@ public class TransformOperator {
         }
 
         // 2. Precondition (sign-flip)
-        for (int i = 0; i < dimension; i++) {
-            x[i] = x[i] * signs[i];
+        int idx = 0;
+        int upper = SPECIES.loopBound(dimension);
+        for (; idx < upper; idx += SPECIES.length()) {
+            FloatVector va = FloatVector.fromArray(SPECIES, x, idx);
+            FloatVector vb = FloatVector.fromArray(SPECIES, signs, idx);
+            va.mul(vb).intoArray(x, idx);
+        }
+        for (; idx < dimension; idx++) {
+            x[idx] = x[idx] * signs[idx];
         }
         return x;
     }
@@ -213,18 +248,43 @@ public class TransformOperator {
     private void fwht(float[] a, int start, int length) {
         for (int len = 1; len < length; len <<= 1) {
             for (int i = 0; i < length; i += (len << 1)) {
-                for (int j = 0; j < len; j++) {
-                    float u = a[start + i + j];
-                    float v = a[start + i + len + j];
-                    a[start + i + j] = u + v;
-                    a[start + i + len + j] = u - v;
+                if (len >= SPECIES.length()) {
+                    int j = 0;
+                    int lenBound = SPECIES.loopBound(len);
+                    for (; j < lenBound; j += SPECIES.length()) {
+                        FloatVector vu = FloatVector.fromArray(SPECIES, a, start + i + j);
+                        FloatVector vv = FloatVector.fromArray(SPECIES, a, start + i + len + j);
+                        FloatVector vAdd = vu.add(vv);
+                        FloatVector vSub = vu.sub(vv);
+                        vAdd.intoArray(a, start + i + j);
+                        vSub.intoArray(a, start + i + len + j);
+                    }
+                    for (; j < len; j++) {
+                        float u = a[start + i + j];
+                        float v = a[start + i + len + j];
+                        a[start + i + j] = u + v;
+                        a[start + i + len + j] = u - v;
+                    }
+                } else {
+                    for (int j = 0; j < len; j++) {
+                        float u = a[start + i + j];
+                        float v = a[start + i + len + j];
+                        a[start + i + j] = u + v;
+                        a[start + i + len + j] = u - v;
+                    }
                 }
             }
         }
         // Orthogonal normalization
         float scale = (float) (1.0 / Math.sqrt(length));
-        for (int i = 0; i < length; i++) {
-            a[start + i] *= scale;
+        int idx = 0;
+        int upper = SPECIES.loopBound(length);
+        for (; idx < upper; idx += SPECIES.length()) {
+            FloatVector va = FloatVector.fromArray(SPECIES, a, start + idx);
+            va.mul(scale).intoArray(a, start + idx);
+        }
+        for (; idx < length; idx++) {
+            a[start + idx] *= scale;
         }
     }
 

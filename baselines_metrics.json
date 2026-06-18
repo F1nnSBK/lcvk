@@ -1,4 +1,10 @@
 {
-  "faiss_mvps": 75.38384410102785,
-  "sequential_mvps": 4.5156920292656455
+  "faiss_mvps": 97.91628509829987,
+  "sequential_mvps": 5.385635752417054,
+  "faiss_latency_us": 1021.2805755407107,
+  "sequential_latency_us": 18567.910010460764,
+  "faiss_time_ms": 283.9160000003176,
+  "sequential_time_ms": 5161.878982908092,
+  "faiss_mem_mb": 793.375,
+  "sequential_mem_mb": 796.40625
 }

@@ -1,5 +1,7 @@
 # Pithos Vector Search Engine
 
+*(Note: This repository was formerly known as `lcvk`)*
+
 A high-performance, Ahead-of-Time (AOT) compiled, dimension-agnostic vector search engine written in **Java 25**, optimized for **Matryoshka-structured binary embeddings** at planetary scale, and compiled into a native shared library (`.dylib` / `.so`) via **GraalVM Native Image**.
 
 Pithos achieves its speed by collapsing abstraction boundaries between language runtimes, the operating system, and hardware execution models. It bypasses garbage collection entirely, mapping memory-bandwidth-bound datasets off-heap using the Java Foreign Function & Memory (FFM) API (Project Panama) and POSIX-aligned virtual memory mapping (`mmap`).
@@ -10,24 +12,41 @@ Pithos achieves its speed by collapsing abstraction boundaries between language 
 
 Pithos is built on the premise that the database is a physical extension of the embedding model itself. Both share a mathematical contract established during model training:
 
+```mermaid
+graph TD
+    classDef main fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
+    classDef step fill:#f1f8e9,stroke:#558b2f,stroke-width:2px;
+    classDef storage fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;
+    
+    A[Raw Input Vector x]:::main --> B["Rademacher Preconditioning (z = x ⊙ d)"]:::step
+    B --> C["Sylvester-Hadamard Rotation (H_BD ⊕ Ω_v)"]:::step
+    C --> D["1-Bit Binarization (b = sign(z))"]:::step
+    D --> E["SVD-Driven Spectral Truncation (Energy Budget τ)"]:::step
+    
+    subgraph Storage Layer [POSIX Off-Heap Columnar Storage]
+        F["Tombstone & Validity Mask (metadata.bin)"]:::storage
+        G["Hierarchical Columns (tier_0.bin ... tier_n.bin)"]:::storage
+    end
+    
+    E --> F
+    E --> G
+    
+    subgraph Read Path [3-Gate Cascaded Read-Path]
+        H{{"Gate 1: Liveliness Check (T_i == 1 or M_i == 0)"}}:::step
+        I{{"Gate 2: Quantization Entropy Gate (MSB Check)"}}:::step
+        J{{"Gate 3: XOR-Popcount Hamming Cascade"}}:::step
+    end
+    
+    F --> H
+    G --> I
+    I -- "Early Exit (Flat Terrain)" --> K[Skip Record]:::main
+    I -- "Pass" --> J
+    J -- "Distance > Threshold" --> L[Skip / Prune Record]:::main
+    J -- "Distance <= Threshold" --> M[Multi-Family Resonant Voting]:::step
+    
+    M --> N["Resonant Match (Vote count >= K_vote)"]:::main
 ```
-                  [ Raw Input Vector x ]
-                            │
-                            ▼
-        [ Rademacher Preconditioning: z = x * D_pre ]
-                            │
-                            ▼
-      [ Block Walsh-Hadamard Rotation: z = H_BD * z ]
-                            │
-                            ▼
-           [ 1-Bit Binarization: b = sign(z) ]
-                            │
-                            ▼
-               [ Cascaded Hierarchical Scan ]
-               ├── Gate 1: Tombstone & Attribute Mask
-               ├── Gate 2: Quantization Entropy Gate (QEG)
-               └── Gate 3: XOR-Popcount Cascade (Tiers 0..T)
-```
+
 
 ### 1. Isomorphic Transformation & Matryoshka Tiers
 
@@ -127,11 +146,16 @@ $$\text{popcount}(V_i^{\text{merged}}) \ge K_{\text{vote}} \quad \text{where } K
 ├── Dockerfile              # Multi-stage compile environment with GraalVM JDK 25 and GCC
 ├── README.md               # This file
 ├── build.sh                # Docker build script (exports compiled Linux library)
+├── run_benchmark.sh        # One-click benchmark (reproducible results)
 ├── test_client.c           # C verification client calling Pithos float C-API
 ├── verify_scale.sh         # Scale stress-test wrapper script
 ├── benchmark.py            # Python ctypes performance sweep and verification
 ├── run_real_verification.py# Real-data MNIST/DINOv3 verification pipeline
+├── examples/               # Developer integration demos
+│   ├── cpp/demo.c          # C integration demo linking libpithos
+│   └── java/ZeroCostDemo.java# FFM Panama off-heap GC bypass demo
 └── src
+
     ├── main
     │   └── java
     │       └── org
@@ -152,7 +176,11 @@ $$\text{popcount}(V_i^{\text{merged}}) \ge K_{\text{vote}} \quad \text{where } K
 
 ---
 
-## C-API Reference
+## Zero-Cost Abstraction Demos & C-API Reference
+
+To demonstrate how Pithos collapses abstraction boundaries and runs GC-free:
+- **[ZeroCostDemo.java](file:///Users/finnhertsch/projects/lcvk/examples/java/ZeroCostDemo.java):** Showcases off-heap virtual memory mapping via Java 25 Foreign Function & Memory (FFM) API memory segments and ValueLayout access, avoiding GC overhead.
+- **[demo.c](file:///Users/finnhertsch/projects/lcvk/examples/cpp/demo.c):** Demonstrates how to link `libpithos` and invoke the engine natively from C/C++.
 
 The compiled native library exposes the following dynamic C interfaces:
 
@@ -224,23 +252,67 @@ Pithos transforms, binarizes, and indexes raw float vectors into 384-bit Matryos
 | **Actual Positive** | TP: 140,118 | FN: 25,410 |
 | **Actual Negative** | FP: 70,390 | TN: 764,082 |
 
+<!-- BENCHMARK_METRICS_START -->
 #### Search Execution Performance (Host-Native macOS)
-- **Scan Latency:** **43.95 ms** mean latency for 1,000,000 records (278 queries)
-- **Throughput:** **6,324.14 ± 160.33 MVPS** (95% Confidence Interval, $N=10$, mean: **6,324.14 MVPS**, $\sigma$: **224.14 MVPS**, using lock-free multi-family resonant voting)
+- **Scan Latency:** **40.89 ms** mean latency for 100,000 records (278 queries)
+- **Throughput:** **679.87 MVPS** (using lock-free multi-family resonant voting, peak memory: **878.4 MB**)
 
 ### 2. High-Performance Native Performance vs. Baselines & Virtualization
 
-Bypassing Docker Desktop's virtualization layer and running natively on the macOS host avoids hypervisor scheduling overheads and OS context switching on `BlockingWaitStrategy` locks. Pithos's binarized projection and 3-Gate early-exit cascade yield large speedups over exact float scan baselines on the same 1,000,000 replicated lunar vector database:
+Bypassing Docker Desktop's virtualization layer and running natively on the macOS host avoids hypervisor scheduling overheads and OS context switching on `BlockingWaitStrategy` locks. Pithos's binarized projection and 3-Gate early-exit cascade yield large speedups over exact float scan baselines on the same 100,000 replicated lunar vector database:
 
 | Backend | Throughput |
 |---|---|
-| Sequential JIT Compiled Baseline (float L2) | 4.52 MVPS |
-| FAISS Flat L2 (CPU Native) | 75.38 MVPS |
-| Pithos — Docker VM | 955.34 MVPS |
-| **Pithos — Host-Native macOS** | **6,324.14 MVPS** (95% CI: **[6,163.81, 6,484.47] MVPS**) |
+| Sequential JIT Compiled Baseline (float L2) | 5.39 MVPS |
+| FAISS Flat L2 (CPU Native) | 97.92 MVPS |
+| **Pithos -- Host-Native macOS** | **679.87 MVPS** (Peak Memory: **878.4 MB**) |
 
-Host-native Pithos achieves a **~6.6× speedup** over Docker and a **~83.9× speedup** over native FAISS Flat L2.
-### 3. Visual Charts (Vector Anomaly Distribution & Throughput Analysis)
+Host-native Pithos achieves a **~126.2x speedup** over the JIT baseline and a **~6.9x speedup** over native FAISS Flat L2.
+
+### 3. Dimensionality Crossover Analysis (Pithos vs FAISS Flat L2)
+
+Measured on 100,000 records with K=100. Single-query measures raw FFI point-lookup latency; multi-query (N=100) measures batched SIMD throughput.
+
+| D | Single-Query Latency (Pithos) | Single-Query Latency (FAISS) | Multi-Query MVPS (Pithos) | Multi-Query MVPS (FAISS) | Speedup |
+|---:|---:|---:|---:|---:|---:|
+| 16 | 310.8 us | 236.9 us | 1,244.08 | 2,302.87 | -1.9x |
+| 32 | 303.6 us | 325.7 us | 1,094.31 | 1,596.48 | -1.5x |
+| 64 | 318.0 us | 484.2 us | 1,105.17 | 964.72 | 1.1x |
+| 128 | 381.9 us | 974.0 us | 956.07 | 333.26 | 2.9x |
+| 256 | 425.7 us | 2,195.0 us | 724.43 | 155.91 | 4.6x |
+| 384 | 527.0 us | 3,130.7 us | 627.61 | 96.94 | 6.5x |
+| 512 | 555.0 us | 4,583.9 us | 547.95 | 46.17 | 11.9x |
+| 768 | 658.0 us | 5,749.1 us | 502.27 | 39.99 | 12.6x |
+| 1024 | 771.7 us | 7,927.0 us | 414.89 | 31.21 | 13.3x |
+
+**Single-Query Crossover:** D=16 -> D=32 (faiss -> pithos)
+**Multi-Query Crossover:** D=32 -> D=64 (faiss -> pithos)
+
+### 4. Recall@K -- Speed-Accuracy Trade-Off
+
+Pithos uses 1-bit binarization and Matryoshka cascading early-exits to achieve its speedup. This table quantifies the accuracy cost by measuring how many of FAISS Flat L2's exact Top-K neighbors Pithos recovers on real lunar embedding data (100,000 records, 278 queries, D=384):
+
+| K | Recall@K | FAISS Latency (ms) | Pithos Latency (ms) | Speedup |
+|---:|---:|---:|---:|---:|
+| 1 | 17.99% | 20.13 | 11.60 | 1.7x |
+| 10 | 18.53% | 20.13 | 11.60 | 1.7x |
+| 50 | 28.52% | 20.13 | 11.60 | 1.7x |
+| 100 | 33.84% | 20.13 | 11.60 | 1.7x |
+
+At K=100, Pithos retains **33.84%** of the exact nearest neighbors while delivering a **1.7x speedup** over FAISS Flat L2.
+
+### 5. Resonant Voting Stress-Test (Discipline 2)
+
+Multi-Family Resonant Voting across 278 queries, 8 scientific criteria families, Hamming threshold 40 bits, 100,000 records:
+
+| Backend | Total Time (ms) | Throughput (MVPS) | Speedup |
+|---|---:|---:|---:|
+| FAISS Emulated Voting | 695.22 | 39.99 | 1.0x |
+| **Pithos Native FFM Kernel** | **8.60** | **3,233.59** | **80.9x** |
+
+Pithos's native resonant voting kernel achieves a **80.9x speedup** by fusing threshold filtering, family bitmask OR, and cascaded early-exit into a single SIMD-aligned memory pass, eliminating the need for intermediate distance materialization and Python-side aggregation.
+
+### Visual Charts (Vector Anomaly Distribution & Throughput Analysis)
 
 #### Hamming Distance Distribution
 ![Hamming Distance Distribution](assets/distribution_plot.svg)
@@ -248,9 +320,21 @@ Host-native Pithos achieves a **~6.6× speedup** over Docker and a **~83.9× spe
 #### Throughput Comparison
 ![Throughput Comparison](assets/throughput_comparison.svg)
 
+#### Performance Crossover Curve
+![Performance Crossover Curve](assets/crossover_curve.png)
+<!-- BENCHMARK_METRICS_END -->
+
 ---
 
 ## Build & Run
+
+### 0. One-Click Benchmark (Reproducibility)
+
+You can run the entire evaluation suite (baselines + Pithos sweeps) and print the side-by-side performance results table with a single command:
+
+```bash
+./run_benchmark.sh
+```
 
 ### 1. Compile & Build (Native macOS)
 

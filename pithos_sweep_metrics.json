@@ -1,0 +1,121 @@
+{
+  "dimensionality_sweep": [
+    {
+      "dim": 16,
+      "single_query": {
+        "pithos_latency_us": 310.83,
+        "faiss_latency_us": 236.92,
+        "winner": "faiss"
+      },
+      "multi_query": {
+        "pithos_mvps": 1244.08,
+        "faiss_mvps": 2302.87,
+        "winner": "faiss"
+      }
+    },
+    {
+      "dim": 32,
+      "single_query": {
+        "pithos_latency_us": 303.58,
+        "faiss_latency_us": 325.67,
+        "winner": "pithos"
+      },
+      "multi_query": {
+        "pithos_mvps": 1094.31,
+        "faiss_mvps": 1596.48,
+        "winner": "faiss"
+      }
+    },
+    {
+      "dim": 64,
+      "single_query": {
+        "pithos_latency_us": 317.96,
+        "faiss_latency_us": 484.17,
+        "winner": "pithos"
+      },
+      "multi_query": {
+        "pithos_mvps": 1105.17,
+        "faiss_mvps": 964.72,
+        "winner": "pithos"
+      }
+    },
+    {
+      "dim": 128,
+      "single_query": {
+        "pithos_latency_us": 381.92,
+        "faiss_latency_us": 973.96,
+        "winner": "pithos"
+      },
+      "multi_query": {
+        "pithos_mvps": 956.07,
+        "faiss_mvps": 333.26,
+        "winner": "pithos"
+      }
+    },
+    {
+      "dim": 256,
+      "single_query": {
+        "pithos_latency_us": 425.71,
+        "faiss_latency_us": 2195.0,
+        "winner": "pithos"
+      },
+      "multi_query": {
+        "pithos_mvps": 724.43,
+        "faiss_mvps": 155.91,
+        "winner": "pithos"
+      }
+    },
+    {
+      "dim": 384,
+      "single_query": {
+        "pithos_latency_us": 526.96,
+        "faiss_latency_us": 3130.67,
+        "winner": "pithos"
+      },
+      "multi_query": {
+        "pithos_mvps": 627.61,
+        "faiss_mvps": 96.94,
+        "winner": "pithos"
+      }
+    },
+    {
+      "dim": 512,
+      "single_query": {
+        "pithos_latency_us": 555.04,
+        "faiss_latency_us": 4583.87,
+        "winner": "pithos"
+      },
+      "multi_query": {
+        "pithos_mvps": 547.95,
+        "faiss_mvps": 46.17,
+        "winner": "pithos"
+      }
+    },
+    {
+      "dim": 768,
+      "single_query": {
+        "pithos_latency_us": 658.04,
+        "faiss_latency_us": 5749.08,
+        "winner": "pithos"
+      },
+      "multi_query": {
+        "pithos_mvps": 502.27,
+        "faiss_mvps": 39.99,
+        "winner": "pithos"
+      }
+    },
+    {
+      "dim": 1024,
+      "single_query": {
+        "pithos_latency_us": 771.67,
+        "faiss_latency_us": 7926.96,
+        "winner": "pithos"
+      },
+      "multi_query": {
+        "pithos_mvps": 414.89,
+        "faiss_mvps": 31.21,
+        "winner": "pithos"
+      }
+    }
+  ]
+}

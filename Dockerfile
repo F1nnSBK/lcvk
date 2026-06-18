@@ -65,8 +65,8 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy the compiled shared library and the exported C headers from builder
-COPY --from=builder /build/target/lunar_core.so ./liblunar_core.so
-COPY --from=builder /build/target/lunar_core.h .
+COPY --from=builder /build/target/libpithos.so ./libpithos.so
+COPY --from=builder /build/target/pithos.h .
 COPY --from=builder /build/target/graal_isolate.h .
 COPY test_client.c .
 COPY benchmark.py .
@@ -74,10 +74,10 @@ COPY ingest_pipeline.py .
 COPY query_generator.py .
 COPY run_real_verification.py .
 COPY generate_graphics.py .
-COPY lcvk_metrics.json .
+COPY pithos_metrics.json .
 
-# Compile test client, linking it to our newly built liblunar_core.so
-RUN gcc -o test_client test_client.c -I. -L. -llunar_core -Wl,-rpath,.
+# Compile test client, linking it to our newly built libpithos.so
+RUN gcc -o test_client test_client.c -I. -L. -lpithos -Wl,-rpath,.
 
 # Execute the test client by default
 CMD ["./test_client"]

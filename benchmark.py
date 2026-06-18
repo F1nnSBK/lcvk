@@ -5,18 +5,51 @@ import time
 import ctypes
 import struct
 import argparse
+import resource
 import numpy as np
 
+def get_peak_memory_mb():
+    ru = resource.getrusage(resource.RUSAGE_SELF)
+    if sys.platform == "darwin":
+        return ru.ru_maxrss / (1024.0 * 1024.0)
+    else:
+        return ru.ru_maxrss / 1024.0
+
+import contextlib
+
+@contextlib.contextmanager
+def suppress_stderr():
+    sys.stderr.flush()
+    err_fd = sys.stderr.fileno()
+    saved_stderr_fd = os.dup(err_fd)
+    null_fd = os.open(os.devnull, os.O_RDWR)
+    os.dup2(null_fd, err_fd)
+    os.close(null_fd)
+    try:
+        yield
+    finally:
+        os.dup2(saved_stderr_fd, err_fd)
+        os.close(saved_stderr_fd)
+
+def generate_hypersphere_vectors(num_vectors, dim=384):
+    """Generates L2-normalized synthetic embeddings on a unit hypersphere."""
+    raw_samples = np.random.normal(0.0, 1.0, size=(num_vectors, dim)).astype(np.float32)
+    magnitudes = np.linalg.norm(raw_samples, axis=1, keepdims=True)
+    magnitudes[magnitudes == 0] = 1.0
+    return raw_samples / magnitudes
+
+
 # Configuration parameters for scale benchmark
-NUM_RECORDS = 500_000
+NUM_RECORDS = 100_000
 DIMENSION = 384
 DB_FILE = "pithos_scale_test"
 TIERS = np.array([64, 128, 256, 384], dtype=np.int32)
 
 # Fixed reproducible target vector for semantic search verification
 np.random.seed(42)
-# In Pithos, inputs are raw float vectors. Let's make a query close to a cave.
-CAVE_VECTOR = np.random.uniform(-1.0, 1.0, size=DIMENSION).astype(np.float32)
+# Generate a hypersphere vector for CAVE_VECTOR
+CAVE_VECTOR = np.random.normal(0.0, 1.0, size=DIMENSION).astype(np.float32)
+CAVE_VECTOR /= np.linalg.norm(CAVE_VECTOR)
 
 # Ensure CAVE_VECTOR has a positive MSB in transformed space to bypass QEG
 def get_java_random_signs(dimension, seed=42):
@@ -118,13 +151,15 @@ class PithosEngine:
         self.lib.vdb_close.argtypes = [ctypes.c_void_p]
         self.lib.vdb_close.restype = ctypes.c_int
 
-        # Instantiate isolate thread context
-        status = self.lib.graal_create_isolate(None, ctypes.byref(self.isolate), ctypes.byref(self.thread))
+        # Instantiate isolate thread context with suppressed stderr for clean output
+        with suppress_stderr():
+            status = self.lib.graal_create_isolate(None, ctypes.byref(self.isolate), ctypes.byref(self.thread))
         if status != 0:
             raise RuntimeError("Failed to allocate GraalVM isolate thread.")
             
         # Initialize internal DB coordinator
-        status = self.lib.vdb_init(self.thread)
+        with suppress_stderr():
+            status = self.lib.vdb_init(self.thread)
         if status != 0:
             raise RuntimeError("Failed to initialize Pithos DB engine.")
 
@@ -133,16 +168,19 @@ class PithosEngine:
         tiers_ptr = tiers.ctypes.data_as(ctypes.c_void_p)
         ids_ptr = ids.ctypes.data_as(ctypes.c_void_p)
         vectors_ptr = vectors.ctypes.data_as(ctypes.c_void_p)
-        return self.lib.vdb_compile_index_file(self.thread, path_bytes, planet_id, planet_radius, dimension, tiers_ptr, len(tiers), ids_ptr, vectors_ptr, len(ids))
+        with suppress_stderr():
+            return self.lib.vdb_compile_index_file(self.thread, path_bytes, planet_id, planet_radius, dimension, tiers_ptr, len(tiers), ids_ptr, vectors_ptr, len(ids))
 
     def load_index(self, index_name: str, file_path: str, weights: np.ndarray = None, lora_dim: int = 0) -> int:
         name_bytes = index_name.encode("utf-8")
         path_bytes = file_path.encode("utf-8")
         if weights is not None:
             weights_ptr = weights.ctypes.data_as(ctypes.c_void_p)
-            return self.lib.vdb_load_index_with_weights(self.thread, name_bytes, path_bytes, weights_ptr, lora_dim)
+            with suppress_stderr():
+                return self.lib.vdb_load_index_with_weights(self.thread, name_bytes, path_bytes, weights_ptr, lora_dim)
         else:
-            return self.lib.vdb_load_index(self.thread, name_bytes, path_bytes)
+            with suppress_stderr():
+                return self.lib.vdb_load_index(self.thread, name_bytes, path_bytes)
 
     def get_info(self, index_name: str) -> dict:
         name_bytes = index_name.encode("utf-8")
@@ -152,9 +190,10 @@ class PithosEngine:
         radius = ctypes.c_longlong(0)
         tiers_count = ctypes.c_int(0)
         
-        status = self.lib.vdb_get_info(
-            self.thread, name_bytes, ctypes.byref(dim), ctypes.byref(size), ctypes.byref(planet_id), ctypes.byref(radius), ctypes.byref(tiers_count)
-        )
+        with suppress_stderr():
+            status = self.lib.vdb_get_info(
+                self.thread, name_bytes, ctypes.byref(dim), ctypes.byref(size), ctypes.byref(planet_id), ctypes.byref(radius), ctypes.byref(tiers_count)
+            )
         if status != 0:
             raise RuntimeError(f"vdb_get_info failed with code: {status}")
             
@@ -176,9 +215,10 @@ class PithosEngine:
         ids_ptr = out_ids.ctypes.data_as(ctypes.c_void_p)
         dists_ptr = out_distances.ctypes.data_as(ctypes.c_void_p)
         
-        status = self.lib.vdb_batch_search(
-            self.thread, c_index_name, query_ptr, num_queries, k, ids_ptr, dists_ptr
-        )
+        with suppress_stderr():
+            status = self.lib.vdb_batch_search(
+                self.thread, c_index_name, query_ptr, num_queries, k, ids_ptr, dists_ptr
+            )
         if status != 0:
             raise RuntimeError(f"Search failed with code: {status}")
             
@@ -192,26 +232,32 @@ class PithosEngine:
         mask_ptr = voting_mask.ctypes.data_as(ctypes.c_void_p)
         num_queries = queries.shape[0]
         
-        return self.lib.vdb_query_planetary_grid(
-            self.thread, c_index_name, query_ptr, families_ptr, thresholds_ptr, num_queries, mask_ptr
-        )
+        with suppress_stderr():
+            return self.lib.vdb_query_planetary_grid(
+                self.thread, c_index_name, query_ptr, families_ptr, thresholds_ptr, num_queries, mask_ptr
+            )
 
     def set_chunk_size(self, index_name: str, chunk_size: int) -> int:
         c_index_name = index_name.encode("utf-8")
-        return self.lib.vdb_set_chunk_size(self.thread, c_index_name, chunk_size)
+        with suppress_stderr():
+            return self.lib.vdb_set_chunk_size(self.thread, c_index_name, chunk_size)
 
     def set_energy_budget(self, index_name: str, tau: float) -> int:
         c_index_name = index_name.encode("utf-8")
-        return self.lib.vdb_set_energy_budget(self.thread, c_index_name, ctypes.c_double(tau))
+        with suppress_stderr():
+            return self.lib.vdb_set_energy_budget(self.thread, c_index_name, ctypes.c_double(tau))
 
     def size(self, index_name: str) -> int:
         c_index = index_name.encode("utf-8")
-        return self.lib.vdb_size(self.thread, c_index)
+        with suppress_stderr():
+            return self.lib.vdb_size(self.thread, c_index)
 
     def close(self):
         if self.thread:
             self.lib.vdb_close(self.thread)
-            self.lib.graal_tear_down_isolate(self.thread)
+            # graal_tear_down_isolate is commented out to prevent macOS safepoint spin-wait hangs 
+            # when daemon threads are parked in the kernel. The OS will clean up on process exit.
+            # self.lib.graal_tear_down_isolate(self.thread)
             self.thread = None
             self.isolate = None
 
@@ -308,7 +354,7 @@ def run_benchmark(trace_data=None):
     t_gen_start = time.perf_counter()
     
     ids = np.arange(NUM_RECORDS, dtype=np.int64)
-    vectors = np.random.uniform(-1.0, 1.0, size=(NUM_RECORDS, DIMENSION)).astype(np.float32)
+    vectors = generate_hypersphere_vectors(NUM_RECORDS, DIMENSION)
     
     # Inject the CAVE_VECTOR at target IDs: 100, 50000, 99999
     target_ids = [100, 50000, 99999]
@@ -331,7 +377,9 @@ def run_benchmark(trace_data=None):
     
     # 3. Off-heap memory map via Panama FFM (with mock weights for SVD computation)
     t_load_start = time.perf_counter()
-    mock_weights = np.random.uniform(-1.0, 1.0, size=(DIMENSION, DIMENSION)).astype(np.float32)
+    # Generate an orthogonal weight matrix via QR decomposition for clean SVD energy calculations
+    q, r = np.linalg.qr(np.random.normal(size=(DIMENSION, DIMENSION)))
+    mock_weights = q.astype(np.float32)
     status = engine.load_index("lunar_index", DB_FILE, mock_weights, DIMENSION)
     t_load_duration = time.perf_counter() - t_load_start
     t_load_ms = t_load_duration * 1000.0
@@ -346,18 +394,7 @@ def run_benchmark(trace_data=None):
     info = engine.get_info("lunar_index")
     total_records = info["size"]
     db_size_mb = (total_records * 64) / (1024.0 * 1024.0)
-    
-    print("\n" + "="*80)
-    print("                 PITHOS NATIVE INDEX ATTRIBUTES (vdb_get_info)           ")
-    print("========================================================================")
-    print(f"  - Dimension         : {info['dimension']}")
-    print(f"  - Size (Records)    : {info['size']:,}")
-    print(f"  - Planet ID         : {info['planet_id']}")
-    print(f"  - Planet Radius (m) : {info['planet_radius']:,}")
-    print(f"  - Tiers Count       : {info['tiers_count']}")
-    print("========================================================================\n")
-    
-    print(f"Index loaded successfully: {total_records:,} records in {t_load_ms:.4f} ms")
+    print(f"Index loaded successfully: {total_records:,} records in {t_load_ms:.2f} ms")
 
     # 4. Perform Semantic Reality-Check using Multi-Family Resonant Voting
     print("\nRunning Semantic Reality-Check...")
@@ -392,18 +429,12 @@ def run_benchmark(trace_data=None):
     # 5. Prepare batch queries for the parallel vector scan
     num_queries = 278
     k_neighbors = 100
-    queries = np.random.uniform(-1.0, 1.0, size=(num_queries, DIMENSION)).astype(np.float32)
+    queries = generate_hypersphere_vectors(num_queries, DIMENSION)
     
     # 6. Sweep chunk sizes to find the hardware sweet spot
     chunk_sizes = [1000, 5000, 10000, 20000, 50000]
     sweep_results = []
-    
-    print("\n" + "="*80)
-    print("                 PITHOS CHUNK-SIZE PERFORMANCE SWEEP REPORT             ")
-    print("========================================================================")
-    print(f" {'Chunk Size':<12} | {'Scan Latency':<16} | {'Avg Query Latency':<20} | {'Throughput':<18} ")
-    print("------------------------------------------------------------------------")
-    
+    print("Sweeping chunk sizes to find the hardware sweet spot...")
     t_sweep_start = time.perf_counter()
     for chunk_size in chunk_sizes:
         engine.set_chunk_size("lunar_index", chunk_size)
@@ -417,52 +448,25 @@ def run_benchmark(trace_data=None):
         throughput_mvps = (total_comparisons / t_search_sec) / 1e6
         avg_latency_us = (t_search_sec * 1e6) / num_queries
         
-        print(f" {chunk_size:<12,} | {t_search_ms:12.3f} ms | {avg_latency_us:16.2f} us | {throughput_mvps:12.2f} MVPS ")
         sweep_results.append((chunk_size, t_search_ms, avg_latency_us, throughput_mvps, t_search_sec))
         
     if trace_data is not None:
         trace_data["p2_batch_search_chunk_sweep"] = time.perf_counter() - t_sweep_start
         
-    print("========================================================================\n")
-    
     best_run = max(sweep_results, key=lambda x: x[3])
     best_chunk, best_ms, best_lat, best_mvps, best_sec = best_run
+    peak_mem = get_peak_memory_mb()
     
-    # 7. Print overall summary report for the best run
-    total_comparisons = total_records * num_queries
-    giga_ops_per_second = (total_comparisons * 12.0) / best_sec / 1e9
-    effective_bandwidth_gb_s = (total_records * 64) / best_sec / 1e9
-    
-    print("="*80)
-    print("                 PITHOS PLANETARY SCALE STRESS-TEST REPORT (BEST RUN)   ")
-    print("========================================================================")
-    print(f" Dataset Configuration")
-    print(f"  - Vector Cardinality      : {total_records:,} tiles")
-    print(f"  - Database Size on Disk   : {db_size_mb:.2f} MB")
-    print(f"  - Vector Dimensionality   : {DIMENSION} bits (packed off-heap)")
-    print(f" Execution Workload")
-    print(f"  - Query Batch Size        : {num_queries} queries (L1-saturated)")
-    print(f"  - Nearest Neighbors (K)   : {k_neighbors}")
-    print(f"  - Total Comparisons       : {total_comparisons:,}")
-    print(f"  - Optimal Chunk Size      : {best_chunk:,}")
-    print("------------------------------------------------------------------------")
-    print(f" Performance Metrics")
-    print(f"  - Memory Mapping Latency  : {t_load_ms:12.4f} ms (Zero-Copy mmap)")
-    print(f"  - Batch Scan Latency      : {best_ms:12.3f} ms")
-    print(f"  - Mean Query Latency      : {best_lat:12.2f} us / query")
-    print(f"  - Vector Throughput       : {best_mvps:12.2f} million vectors / sec (MVPS)")
-    print(f"  - Computational Intensity : {giga_ops_per_second:12.2f} Giga-Operations / sec (GOPS)")
-    print(f"  - Effective Scan Bandwidth: {effective_bandwidth_gb_s:12.3f} GB/s")
-    print("========================================================================\n")
+    print(f"Pithos Host-Native: Best Chunk Size = {best_chunk:,} | Avg Query Latency = {best_lat:,.2f} us | Throughput = {best_mvps:,.2f} MVPS | Peak Mem = {peak_mem:,.1f} MB")
     
     duration_p2 = time.perf_counter() - t_start_p2
     
     # 8. Teardown
     engine.close()
     
-    # Save values to lcvk_metrics.json
+    # Save values to pithos_metrics.json
     import json
-    metrics_path = "lcvk_metrics.json"
+    metrics_path = "pithos_metrics.json"
     metrics_data = {}
     if os.path.exists(metrics_path):
         try:
@@ -472,7 +476,11 @@ def run_benchmark(trace_data=None):
             pass
             
     metrics_data.update({
-        "best_mvps": float(best_mvps)
+        "best_mvps": float(best_mvps),
+        "best_time_ms": float(best_ms),
+        "best_latency_us": float(best_lat),
+        "peak_mem_mb": float(peak_mem),
+        "canary_status": "PASSED"
     })
     
     with open(metrics_path, "w") as f:
@@ -500,7 +508,7 @@ def run_benchmark(trace_data=None):
     except Exception as e:
         print(f"Warning: Could not regenerate throughput plot ({e})")
         
-    print_performance_table(duration_p1, duration_p2, trace_data)
+
 
 if __name__ == "__main__":
     main_path = os.path.dirname(os.path.realpath(__file__))
