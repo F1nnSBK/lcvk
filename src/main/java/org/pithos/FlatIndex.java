@@ -55,6 +55,7 @@ public class FlatIndex implements Index {
     private final TransformOperator transformOperator;
     private final float[] cumulativeEnergy;
     private double targetEnergyBudget = 0.90; // Default energy threshold tau
+    private final int qMode;
 
     // Disruptor context
     private final Disruptor<RangeEvent> disruptor;
@@ -92,7 +93,7 @@ public class FlatIndex implements Index {
         public MemorySegment[] threadLocalMasks;
 
         public void setKnn(long startIdx, long endIdx, float[][] queries, int k,
-                           long[][][] threadLocalIds, int[][][] threadLocalDists, CountDownLatch latch) {
+                long[][][] threadLocalIds, int[][][] threadLocalDists, CountDownLatch latch) {
             this.startIdx = startIdx;
             this.endIdx = endIdx;
             this.queries = queries;
@@ -104,7 +105,7 @@ public class FlatIndex implements Index {
         }
 
         public void setVoting(long startIdx, long endIdx, float[][] queries, int[] families, int[] thresholds,
-                              MemorySegment[] threadLocalMasks, CountDownLatch latch) {
+                MemorySegment[] threadLocalMasks, CountDownLatch latch) {
             this.startIdx = startIdx;
             this.endIdx = endIdx;
             this.queries = queries;
@@ -129,7 +130,8 @@ public class FlatIndex implements Index {
         public void onEvent(RangeEvent event) throws Exception {
             try {
                 if (event.isVoting) {
-                    index.executeVotingRange(event.startIdx, event.endIdx, event.queries, event.families, event.thresholds, event.threadLocalMasks[threadId]);
+                    index.executeVotingRange(event.startIdx, event.endIdx, event.queries, event.families,
+                            event.thresholds, event.threadLocalMasks[threadId]);
                 } else {
                     index.executeKnnRange(event.startIdx, event.endIdx, event.queries, event.k,
                             event.threadLocalIds[threadId], event.threadLocalDists[threadId]);
@@ -140,8 +142,10 @@ public class FlatIndex implements Index {
         }
     }
 
-    public FlatIndex(MemorySegment baseSegment, MemorySegment idsSegment, MemorySegment[] tierSegments, MemorySegment metadataSegment,
-                     byte planetId, long planetRadius, int dimension, int numTiers, int[] tiers, long size, float[] cumulativeEnergy) {
+    public FlatIndex(MemorySegment baseSegment, MemorySegment idsSegment, MemorySegment[] tierSegments,
+            MemorySegment metadataSegment,
+            byte planetId, long planetRadius, int dimension, int numTiers, int[] tiers, long size,
+            float[] cumulativeEnergy, int qMode) {
         this.baseSegment = baseSegment;
         this.idsSegment = idsSegment;
         this.tierSegments = tierSegments;
@@ -153,6 +157,7 @@ public class FlatIndex implements Index {
         this.tiers = tiers;
         this.size = size;
         this.cumulativeEnergy = cumulativeEnergy;
+        this.qMode = qMode;
 
         this.transformOperator = new TransformOperator(dimension, tiers);
 
@@ -168,14 +173,13 @@ public class FlatIndex implements Index {
                 1024,
                 threadFactory,
                 ProducerType.SINGLE,
-                new BlockingWaitStrategy()
-        );
+                new BlockingWaitStrategy());
         this.disruptor.setDefaultExceptionHandler(new ExceptionHandler<RangeEvent>() {
             @Override
             public void handleEventException(Throwable ex, long sequence, RangeEvent event) {
-                if (ex instanceof InterruptedException || 
-                    ex.getCause() instanceof InterruptedException ||
-                    (ex.getMessage() != null && ex.getMessage().contains("InterruptedException"))) {
+                if (ex instanceof InterruptedException ||
+                        ex.getCause() instanceof InterruptedException ||
+                        (ex.getMessage() != null && ex.getMessage().contains("InterruptedException"))) {
                     return;
                 }
                 ex.printStackTrace();
@@ -234,6 +238,9 @@ public class FlatIndex implements Index {
             tiers[i] = mappedBase.get(ValueLayout.JAVA_INT_UNALIGNED, 29 + (i * 4));
         }
 
+        byte qModeByte = mappedBase.get(ValueLayout.JAVA_BYTE, 61);
+        int qMode = qModeByte & 0xFF;
+
         // 2. Map ID file
         Path idsPath = Path.of(basePath + "_ids.bin");
         MemorySegment idsSegment;
@@ -254,8 +261,10 @@ public class FlatIndex implements Index {
         for (int k = 0; k < numTiers; k++) {
             int width = tiers[k] - prevBound;
             Path tierPath = Path.of(basePath + "_tier_" + k + ".bin");
+            long bytesPerRecord = (qMode == 1) ? (width / 4) : (width / 8);
             try (FileChannel channel = FileChannel.open(tierPath, StandardOpenOption.READ)) {
-                tierSegments[k] = channel.map(FileChannel.MapMode.READ_ONLY, 0, totalRecords * (width / 8), Arena.global());
+                tierSegments[k] = channel.map(FileChannel.MapMode.READ_ONLY, 0, totalRecords * bytesPerRecord,
+                        Arena.global());
             }
             prevBound = tiers[k];
         }
@@ -275,7 +284,7 @@ public class FlatIndex implements Index {
         }
 
         return new FlatIndex(mappedBase, idsSegment, tierSegments, metadataSegment,
-                planetId, planetRadius, dimension, numTiers, tiers, totalRecords, cumulativeEnergy);
+                planetId, planetRadius, dimension, numTiers, tiers, totalRecords, cumulativeEnergy, qMode);
     }
 
     @Override
@@ -285,7 +294,7 @@ public class FlatIndex implements Index {
 
     @Override
     public List<SearchResult> search(float[] query, int k) {
-        List<SearchResult>[] results = batchSearch(new float[][]{query}, k);
+        List<SearchResult>[] results = batchSearch(new float[][] { query }, k);
         return results[0];
     }
 
@@ -363,7 +372,8 @@ public class FlatIndex implements Index {
             // Sort merged matches by distance (ascending)
             merged.sort((r1, r2) -> {
                 int cmp = Integer.compare(r1.score(), r2.score());
-                if (cmp != 0) return cmp;
+                if (cmp != 0)
+                    return cmp;
                 return Long.compare(r1.id(), r2.id());
             });
 
@@ -378,15 +388,25 @@ public class FlatIndex implements Index {
         return finalResults;
     }
 
-    private void executeKnnRange(long startIdx, long endIdx, float[][] queries, int k, long[][] myIds, int[][] myDists) {
+    private void executeKnnRange(long startIdx, long endIdx, float[][] queries, int k, long[][] myIds,
+            int[][] myDists) {
         long idsAddr = idsSegment.address();
         long metadataAddr = metadataSegment.address();
         int numQueries = queries.length;
 
         // Binarize all queries once
         long[][] bQueries = new long[numQueries][];
+        long[][] bQueriesMask = new long[numQueries][];
         for (int q = 0; q < numQueries; q++) {
-            bQueries[q] = transformOperator.transformAndQuantize(queries[q]);
+            if (qMode == 1) { // 2-bit mode
+                float[] z = transformOperator.preconditionAndRotate(queries[q]);
+                float qThreshold = TransformOperator.calculatePercentileThreshold(z, 0.20f);
+                long[][] packed = transformOperator.quantize2Bit(z, qThreshold);
+                bQueries[q] = packed[0];
+                bQueriesMask[q] = packed[1];
+            } else {
+                bQueries[q] = transformOperator.transformAndQuantize(queries[q]);
+            }
         }
 
         // Determine target active truncation tier T
@@ -412,6 +432,7 @@ public class FlatIndex implements Index {
 
         int totalLongs = dimension / 64;
         long[] dbWords = new long[totalLongs];
+        long[] dbMasks = new long[totalLongs];
 
         for (long i = startIdx; i < endIdx; i++) {
             // Gate 1: Tombstone & Attribute Mask
@@ -420,25 +441,45 @@ public class FlatIndex implements Index {
                 continue; // Tombstone active -> Deleted
             }
 
-            // Gate 2: QEG (Quantization Entropy Gating)
-            long t0Val = UNSAFE.getLong(tierAddrs[0] + (i * 8));
-            if ((t0Val & (1L << 63)) == 0L) {
-                continue; // Early exit -> Flat background terrain
+            if (qMode == 1) { // 2-bit mode
+                int wordIdx = 0;
+                for (int tierIdx = 0; tierIdx < numTiers; tierIdx++) {
+                    int numLongs = tierLongs[tierIdx];
+                    long baseOffset = i * (numLongs * 16L);
+                    long tAddr = tierAddrs[tierIdx] + baseOffset;
+                    for (int l = 0; l < numLongs; l++) {
+                        dbWords[wordIdx] = UNSAFE.getLong(tAddr + (l * 8));
+                        dbMasks[wordIdx] = UNSAFE.getLong(tAddr + (numLongs * 8L) + (l * 8));
+                        wordIdx++;
+                    }
+                }
+
+                // Gate 2: QEG (Quantization Entropy Gating)
+                long t0Sign = dbWords[0];
+                long t0Mask = dbMasks[0];
+                if ((t0Mask & (1L << 63)) == 0L || (t0Sign & (1L << 63)) == 0L) {
+                    continue; // Early exit
+                }
+            } else { // 1-bit mode
+                // Gate 2: QEG
+                long t0Val = UNSAFE.getLong(tierAddrs[0] + (i * 8));
+                if ((t0Val & (1L << 63)) == 0L) {
+                    continue; // Early exit -> Flat background terrain
+                }
+
+                dbWords[0] = t0Val;
+                int wordIdx = 1;
+                for (int tierIdx = 1; tierIdx < numTiers; tierIdx++) {
+                    int numLongs = tierLongs[tierIdx];
+                    long baseOffset = i * (numLongs * 8L);
+                    long tAddr = tierAddrs[tierIdx] + baseOffset;
+                    for (int l = 0; l < numLongs; l++) {
+                        dbWords[wordIdx++] = UNSAFE.getLong(tAddr + (l * 8));
+                    }
+                }
             }
 
             long recordId = UNSAFE.getLong(idsAddr + (i * 8));
-
-            // Load all words of record i locally to avoid redundant off-heap reads
-            dbWords[0] = t0Val;
-            int wordIdx = 1;
-            for (int tierIdx = 1; tierIdx < numTiers; tierIdx++) {
-                int numLongs = tierLongs[tierIdx];
-                long baseOffset = i * (numLongs * 8L);
-                long tAddr = tierAddrs[tierIdx] + baseOffset;
-                for (int l = 0; l < numLongs; l++) {
-                    dbWords[wordIdx++] = UNSAFE.getLong(tAddr + (l * 8));
-                }
-            }
 
             // Gate 3: XOR-Popcount Cascade
             for (int q = 0; q < numQueries; q++) {
@@ -451,10 +492,23 @@ public class FlatIndex implements Index {
                 for (int tierIdx = 0; tierIdx <= T; tierIdx++) {
                     int numLongs = tierLongs[tierIdx];
                     int tierDist = 0;
-                    for (int l = 0; l < numLongs; l++) {
-                        long qWord = bQueries[q][queryOffsetLongs + l];
-                        long dbWord = dbWords[queryOffsetLongs + l];
-                        tierDist += Long.bitCount(qWord ^ dbWord);
+                    if (qMode == 1) { // 2-bit mode
+                        for (int l = 0; l < numLongs; l++) {
+                            long qSign = bQueries[q][queryOffsetLongs + l];
+                            long qMask = bQueriesMask[q][queryOffsetLongs + l];
+                            long dbSign = dbWords[queryOffsetLongs + l];
+                            long dbMask = dbMasks[queryOffsetLongs + l];
+                            
+                            long mask4 = dbMask & qMask & (dbSign ^ qSign);
+                            long mask1 = dbMask ^ qMask;
+                            tierDist += 4 * Long.bitCount(mask4) + Long.bitCount(mask1);
+                        }
+                    } else { // 1-bit mode
+                        for (int l = 0; l < numLongs; l++) {
+                            long qWord = bQueries[q][queryOffsetLongs + l];
+                            long dbWord = dbWords[queryOffsetLongs + l];
+                            tierDist += Long.bitCount(qWord ^ dbWord);
+                        }
                     }
                     totalDist += tierDist;
                     queryOffsetLongs += numLongs;
@@ -482,10 +536,12 @@ public class FlatIndex implements Index {
 
     @Override
     public long queryPlanetaryGrid(float[][] queries, int[] families, int[] thresholds, MemorySegment votingMask) {
-        if (queries == null || queries.length == 0) return 0;
+        if (queries == null || queries.length == 0)
+            return 0;
         int numQueries = queries.length;
         long numRecords = this.size;
-        if (numRecords == 0) return 0;
+        if (numRecords == 0)
+            return 0;
 
         long currentChunkSize = this.chunkSize;
         long numChunks = (numRecords + currentChunkSize - 1) / currentChunkSize;
@@ -551,15 +607,25 @@ public class FlatIndex implements Index {
         }).sum();
     }
 
-    private void executeVotingRange(long startIdx, long endIdx, float[][] queries, int[] families, int[] thresholds, MemorySegment localMask) {
+    private void executeVotingRange(long startIdx, long endIdx, float[][] queries, int[] families, int[] thresholds,
+            MemorySegment localMask) {
         long metadataAddr = metadataSegment.address();
         long localMaskAddr = localMask.address();
         int numQueries = queries.length;
 
         // Binarize all queries once
         long[][] bQueries = new long[numQueries][];
+        long[][] bQueriesMask = new long[numQueries][];
         for (int q = 0; q < numQueries; q++) {
-            bQueries[q] = transformOperator.transformAndQuantize(queries[q]);
+            if (qMode == 1) { // 2-bit mode
+                float[] z = transformOperator.preconditionAndRotate(queries[q]);
+                float qThreshold = TransformOperator.calculatePercentileThreshold(z, 0.20f);
+                long[][] packed = transformOperator.quantize2Bit(z, qThreshold);
+                bQueries[q] = packed[0];
+                bQueriesMask[q] = packed[1];
+            } else {
+                bQueries[q] = transformOperator.transformAndQuantize(queries[q]);
+            }
         }
 
         // Determine target active truncation tier T
@@ -585,6 +651,7 @@ public class FlatIndex implements Index {
 
         int totalLongs = dimension / 64;
         long[] dbWords = new long[totalLongs];
+        long[] dbMasks = new long[totalLongs];
 
         for (long i = startIdx; i < endIdx; i++) {
             // Gate 1: Tombstone & Attribute Mask
@@ -593,21 +660,42 @@ public class FlatIndex implements Index {
                 continue; // Tombstone active
             }
 
-            // Gate 2: QEG
-            long t0Val = UNSAFE.getLong(tierAddrs[0] + (i * 8));
-            if ((t0Val & (1L << 63)) == 0L) {
-                continue; // Early exit
-            }
+            if (qMode == 1) { // 2-bit mode
+                int wordIdx = 0;
+                for (int tierIdx = 0; tierIdx < numTiers; tierIdx++) {
+                    int numLongs = tierLongs[tierIdx];
+                    long baseOffset = i * (numLongs * 16L);
+                    long tAddr = tierAddrs[tierIdx] + baseOffset;
+                    for (int l = 0; l < numLongs; l++) {
+                        dbWords[wordIdx] = UNSAFE.getLong(tAddr + (l * 8));
+                        dbMasks[wordIdx] = UNSAFE.getLong(tAddr + (numLongs * 8L) + (l * 8));
+                        wordIdx++;
+                    }
+                }
 
-            // Load all words of record i locally to avoid redundant off-heap reads
-            dbWords[0] = t0Val;
-            int wordIdx = 1;
-            for (int tierIdx = 1; tierIdx < numTiers; tierIdx++) {
-                int numLongs = tierLongs[tierIdx];
-                long baseOffset = i * (numLongs * 8L);
-                long tAddr = tierAddrs[tierIdx] + baseOffset;
-                for (int l = 0; l < numLongs; l++) {
-                    dbWords[wordIdx++] = UNSAFE.getLong(tAddr + (l * 8));
+                // Gate 2: QEG
+                long t0Sign = dbWords[0];
+                long t0Mask = dbMasks[0];
+                if ((t0Mask & (1L << 63)) == 0L || (t0Sign & (1L << 63)) == 0L) {
+                    continue; // Early exit
+                }
+            } else { // 1-bit mode
+                // Gate 2: QEG
+                long t0Val = UNSAFE.getLong(tierAddrs[0] + (i * 8));
+                if ((t0Val & (1L << 63)) == 0L) {
+                    continue; // Early exit
+                }
+
+                // Load all words of record i locally to avoid redundant off-heap reads
+                dbWords[0] = t0Val;
+                int wordIdx = 1;
+                for (int tierIdx = 1; tierIdx < numTiers; tierIdx++) {
+                    int numLongs = tierLongs[tierIdx];
+                    long baseOffset = i * (numLongs * 8L);
+                    long tAddr = tierAddrs[tierIdx] + baseOffset;
+                    for (int l = 0; l < numLongs; l++) {
+                        dbWords[wordIdx++] = UNSAFE.getLong(tAddr + (l * 8));
+                    }
                 }
             }
 
@@ -620,10 +708,23 @@ public class FlatIndex implements Index {
                 for (int tierIdx = 0; tierIdx <= T; tierIdx++) {
                     int numLongs = tierLongs[tierIdx];
                     int tierDist = 0;
-                    for (int l = 0; l < numLongs; l++) {
-                        long qWord = bQueries[q][queryOffsetLongs + l];
-                        long dbWord = dbWords[queryOffsetLongs + l];
-                        tierDist += Long.bitCount(qWord ^ dbWord);
+                    if (qMode == 1) { // 2-bit mode
+                        for (int l = 0; l < numLongs; l++) {
+                            long qSign = bQueries[q][queryOffsetLongs + l];
+                            long qMask = bQueriesMask[q][queryOffsetLongs + l];
+                            long dbSign = dbWords[queryOffsetLongs + l];
+                            long dbMask = dbMasks[queryOffsetLongs + l];
+                            
+                            long mask4 = dbMask & qMask & (dbSign ^ qSign);
+                            long mask1 = dbMask ^ qMask;
+                            tierDist += 4 * Long.bitCount(mask4) + Long.bitCount(mask1);
+                        }
+                    } else { // 1-bit mode
+                        for (int l = 0; l < numLongs; l++) {
+                            long qWord = bQueries[q][queryOffsetLongs + l];
+                            long dbWord = dbWords[queryOffsetLongs + l];
+                            tierDist += Long.bitCount(qWord ^ dbWord);
+                        }
                     }
                     totalDist += tierDist;
                     queryOffsetLongs += numLongs;

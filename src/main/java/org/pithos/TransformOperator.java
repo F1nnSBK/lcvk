@@ -197,6 +197,73 @@ public class TransformOperator {
     }
 
     /**
+     * Preconditions a vector with Rademacher signs, rotates via block-diagonal Hadamard.
+     */
+    public float[] preconditionAndRotate(float[] x) {
+        if (x.length != dimension) {
+            throw new IllegalArgumentException("Input vector size " + x.length + " must match dimension " + dimension);
+        }
+
+        // 1. Rademacher Preconditioning (Sign-flip)
+        float[] z = new float[dimension];
+        int i = 0;
+        int upperBound = SPECIES.loopBound(dimension);
+        for (; i < upperBound; i += SPECIES.length()) {
+            FloatVector va = FloatVector.fromArray(SPECIES, x, i);
+            FloatVector vb = FloatVector.fromArray(SPECIES, signs, i);
+            va.mul(vb).intoArray(z, i);
+        }
+        for (; i < dimension; i++) {
+            z[i] = x[i] * signs[i];
+        }
+
+        // 2. Block-Diagonal Hadamard Rotation
+        int start = 0;
+        for (int tier : tiers) {
+            int width = tier - start;
+            rotateBlock(z, start, width);
+            start = tier;
+        }
+        return z;
+    }
+
+    /**
+     * Binarizes a rotated vector z using 2-bit (ternary) quantization with a noise threshold.
+     */
+    public long[][] quantize2Bit(float[] z, float threshold) {
+        int numLongs = (dimension + 63) / 64;
+        long[] signPacked = new long[numLongs];
+        long[] maskPacked = new long[numLongs];
+
+        for (int j = 0; j < dimension; j++) {
+            float val = z[j];
+            float absVal = Math.abs(val);
+            if (absVal >= threshold) {
+                int longIdx = j / 64;
+                int bitIdx = j % 64;
+                maskPacked[longIdx] |= (1L << bitIdx);
+                if (val >= 0.0f) {
+                    signPacked[longIdx] |= (1L << bitIdx);
+                }
+            }
+        }
+        return new long[][]{signPacked, maskPacked};
+    }
+
+    /**
+     * Calculates the threshold at a given percentile for absolute values of z.
+     */
+    public static float calculatePercentileThreshold(float[] z, float percentile) {
+        float[] absValues = new float[z.length];
+        for (int i = 0; i < z.length; i++) {
+            absValues[i] = Math.abs(z[i]);
+        }
+        Arrays.sort(absValues);
+        int index = (int) (z.length * percentile);
+        return absValues[index];
+    }
+
+    /**
      * Back-projects a target transformed vector z to raw input space x.
      * Since H_BD and D_pre are orthogonal/symmetric, back-projecting is
      * self-inverse.

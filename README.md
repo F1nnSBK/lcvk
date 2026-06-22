@@ -254,8 +254,8 @@ Pithos transforms, binarizes, and indexes raw float vectors into 384-bit Matryos
 
 <!-- BENCHMARK_METRICS_START -->
 #### Search Execution Performance (Host-Native macOS)
-- **Scan Latency:** **39.40 ms** mean latency for 100,000 records (278 queries)
-- **Throughput:** **705.49 MVPS** (using lock-free multi-family resonant voting, peak memory: **936.6 MB**)
+- **Scan Latency:** **40.48 ms** mean latency for 100,000 records (278 queries)
+- **Throughput:** **686.84 MVPS** (using lock-free multi-family resonant voting, peak memory: **894.4 MB**)
 
 ### 2. High-Performance Native Performance vs. Baselines & Virtualization
 
@@ -263,11 +263,11 @@ Bypassing Docker Desktop's virtualization layer and running natively on the macO
 
 | Backend | Throughput |
 |---|---|
-| Sequential JIT Compiled Baseline (float L2) | 5.53 MVPS |
-| FAISS Flat L2 (CPU Native) | 100.13 MVPS |
-| **Pithos -- Host-Native macOS** | **705.49 MVPS** (Peak Memory: **936.6 MB**) |
+| Sequential JIT Compiled Baseline (float L2) | 3.05 MVPS |
+| FAISS Flat L2 (CPU Native) | 67.85 MVPS |
+| **Pithos -- Host-Native macOS** | **686.84 MVPS** (Peak Memory: **894.4 MB**) |
 
-Host-native Pithos achieves a **~127.5x speedup** over the JIT baseline and a **~7.0x speedup** over native FAISS Flat L2.
+Host-native Pithos achieves a **~224.8x speedup** over the JIT baseline and a **~10.1x speedup** over native FAISS Flat L2.
 
 ### 3. Dimensionality Crossover Analysis (Pithos vs FAISS Flat L2)
 
@@ -275,18 +275,18 @@ Measured on 100,000 records with K=100. Single-query measures raw FFI point-look
 
 | D | Single-Query Latency (Pithos) | Single-Query Latency (FAISS) | Multi-Query MVPS (Pithos) | Multi-Query MVPS (FAISS) | Speedup |
 |---:|---:|---:|---:|---:|---:|
-| 16 | 316.8 us | 225.8 us | 894.17 | 2,715.55 | -3.0x |
-| 32 | 324.1 us | 351.2 us | 974.86 | 1,640.31 | -1.7x |
-| 64 | 318.5 us | 539.0 us | 1,077.90 | 826.67 | 1.3x |
-| 128 | 409.0 us | 1,368.2 us | 918.38 | 314.95 | 2.9x |
-| 256 | 456.8 us | 1,961.4 us | 766.44 | 186.18 | 4.1x |
-| 384 | 537.6 us | 3,134.8 us | 577.40 | 108.55 | 5.3x |
-| 512 | 591.1 us | 4,172.1 us | 543.35 | 72.80 | 7.5x |
-| 768 | 681.0 us | 5,718.3 us | 473.88 | 45.87 | 10.3x |
-| 1024 | 748.9 us | 7,468.6 us | 416.33 | 33.84 | 12.3x |
+| 16 | 323.8 us | 233.3 us | 1,061.11 | 2,021.51 | -1.9x |
+| 32 | 435.1 us | 327.9 us | 1,087.00 | 1,637.77 | -1.5x |
+| 64 | 305.8 us | 563.9 us | 950.40 | 638.62 | 1.5x |
+| 128 | 381.6 us | 1,042.9 us | 810.97 | 243.42 | 3.3x |
+| 256 | 551.2 us | 2,484.0 us | 668.80 | 133.48 | 5.0x |
+| 384 | 570.8 us | 3,301.5 us | 639.16 | 92.84 | 6.9x |
+| 512 | 591.5 us | 4,844.3 us | 615.25 | 58.69 | 10.5x |
+| 768 | 684.7 us | 6,201.8 us | 471.64 | 41.96 | 11.2x |
+| 1024 | 758.9 us | 9,683.8 us | 416.35 | 24.79 | 16.8x |
 
-**Single-Query Crossover:** D=16 -> D=32 (faiss -> pithos)
 **Multi-Query Crossover:** D=32 -> D=64 (faiss -> pithos)
+**Single-Query Crossover:** D=32 -> D=64 (faiss -> pithos)
 
 ### 4. Recall@K -- Speed-Accuracy Trade-Off
 
@@ -294,12 +294,12 @@ Pithos uses 1-bit binarization and Matryoshka cascading early-exits to achieve i
 
 | K | Recall@K | FAISS Latency (ms) | Pithos Latency (ms) | Speedup |
 |---:|---:|---:|---:|---:|
-| 1 | 17.99% | 17.28 | 10.96 | 1.6x |
-| 10 | 18.53% | 17.28 | 10.96 | 1.6x |
-| 50 | 28.52% | 17.28 | 10.96 | 1.6x |
-| 100 | 33.84% | 17.28 | 10.96 | 1.6x |
+| 1 | 17.99% | 21.41 | 11.99 | 1.8x |
+| 10 | 18.53% | 21.41 | 11.99 | 1.8x |
+| 50 | 28.52% | 21.41 | 11.99 | 1.8x |
+| 100 | 33.84% | 21.41 | 11.99 | 1.8x |
 
-At K=100, Pithos retains **33.84%** of the exact nearest neighbors while delivering a **1.6x speedup** over FAISS Flat L2.
+At K=100, Pithos retains **33.84%** of the exact nearest neighbors while delivering a **1.8x speedup** over FAISS Flat L2.
 
 ### 5. Resonant Voting Stress-Test (Discipline 2)
 
@@ -307,10 +307,10 @@ Multi-Family Resonant Voting across 278 queries, 8 scientific criteria families,
 
 | Backend | Total Time (ms) | Throughput (MVPS) | Speedup |
 |---|---:|---:|---:|
-| FAISS Emulated Voting | 708.15 | 39.26 | 1.0x |
-| **Pithos Native FFM Kernel** | **8.41** | **3,306.96** | **84.2x** |
+| FAISS Emulated Voting | 716.01 | 38.83 | 1.0x |
+| **Pithos Native FFM Kernel** | **8.76** | **3,175.06** | **81.8x** |
 
-Pithos's native resonant voting kernel achieves a **84.2x speedup** by fusing threshold filtering, family bitmask OR, and cascaded early-exit into a single SIMD-aligned memory pass, eliminating the need for intermediate distance materialization and Python-side aggregation.
+Pithos's native resonant voting kernel achieves a **81.8x speedup** by fusing threshold filtering, family bitmask OR, and cascaded early-exit into a single SIMD-aligned memory pass, eliminating the need for intermediate distance materialization and Python-side aggregation.
 
 ### 6. SIFT10K Generalization Benchmark
 
@@ -321,7 +321,7 @@ To verify Pithos's generalization, we benchmark on the standard **SIFT10K** data
 | Recall@1 | 100.00% | 11.00% | - |
 | Recall@10 | 100.00% | 15.10% | - |
 | Recall@100 | 100.00% | 19.79% | - |
-| Query Latency (ms) | 3.41 ms | 4.23 ms | 0.81x |
+| Query Latency (ms) | 3.03 ms | 4.38 ms | 0.69x |
 
 For extremely small databases like SIFT10K (N=10,000), FAISS Flat L2 runs with minimal CPU cache footprint. Pithos's 1-bit Matryoshka recall follows the theoretical error bounds for 128 dimensions.
 
@@ -330,9 +330,9 @@ For extremely small databases like SIFT10K (N=10,000), FAISS Flat L2 runs with m
 We measure the exact roundtrip latency of crossing the Python-to-C boundary (via ctypes) into the GraalVM isolate thread:
 
 - **Total iterations:** 100,000 calls
-- **Average FFI roundtrip latency:** **0.1886 µs**
-- **Pure Python no-op call overhead:** **0.0294 µs**
-- **Net FFI boundary crossing overhead:** **0.1592 µs**
+- **Average FFI roundtrip latency:** **0.1960 µs**
+- **Pure Python no-op call overhead:** **0.0366 µs**
+- **Net FFI boundary crossing overhead:** **0.1593 µs**
 
 This FFI crossing overhead of < 0.2 microseconds is tiny, explaining why Pithos matches/beats native C++ FAISS even for low-dimensional single-query lookups.
 
@@ -342,14 +342,14 @@ We evaluate Pithos as a **first-stage candidate generator** for heavy downstream
 
 | Candidates (K) | Workload Reduction (%) | Recall of Top-10 Pits (%) | Pithos Latency (ms) |
 |---:|---:|---:|---:|
-| 10 | 99.990% | 29.86% | 0.0424 ms |
-| 50 | 99.950% | 29.86% | 0.0567 ms |
-| 100 | 99.900% | 47.12% | 0.1063 ms |
-| 200 | 99.800% | 55.76% | 0.1792 ms |
-| 500 | 99.500% | 68.35% | 0.6651 ms |
-| 1000 | 99.000% | 72.30% | 2.1548 ms |
-| 2000 | 98.000% | 74.10% | 6.7918 ms |
-| 5000 | 95.000% | 74.10% | 28.5149 ms |
+| 10 | 99.990% | 29.86% | 0.0445 ms |
+| 50 | 99.950% | 29.86% | 0.0710 ms |
+| 100 | 99.900% | 47.12% | 0.0901 ms |
+| 200 | 99.800% | 55.76% | 0.1943 ms |
+| 500 | 99.500% | 68.35% | 0.7340 ms |
+| 1000 | 99.000% | 72.30% | 2.8942 ms |
+| 2000 | 98.000% | 74.10% | 7.8475 ms |
+| 5000 | 95.000% | 74.10% | 29.5672 ms |
 
 This dual-axis relationship demonstrates the 'Elbow' trade-off: retrieving 500 candidates provides a **99.50% workload reduction** for the downstream CNN while retaining **68.35%** of target lunar pits in under 0.7 milliseconds.
 

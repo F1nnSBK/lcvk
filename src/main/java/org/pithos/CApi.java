@@ -216,6 +216,16 @@ public class CApi {
     public static int compileIndexFile(IsolateThread thread, CCharPointer path, byte planetId, long planetRadius,
                                        int dimension, CIntPointer tiers, int numTiers,
                                        CLongPointer ids, CFloatPointer vectors, int numRecords) {
+        return compileIndexFileV2(thread, path, planetId, planetRadius, dimension, tiers, numTiers, ids, vectors, numRecords, 0);
+    }
+
+    /**
+     * Compiles raw float records into a multi-tier database file layout with qMode.
+     */
+    @CEntryPoint(name = "vdb_compile_index_file_v2")
+    public static int compileIndexFileV2(IsolateThread thread, CCharPointer path, byte planetId, long planetRadius,
+                                         int dimension, CIntPointer tiers, int numTiers,
+                                         CLongPointer ids, CFloatPointer vectors, int numRecords, int qMode) {
         try {
             String filePath = CTypeConversion.toJavaString(path);
             
@@ -234,7 +244,7 @@ public class CApi {
                 records.add(new VectorRecord(id, vector));
             }
 
-            VectorDb.compileIndexFile(filePath, planetId, planetRadius, dimension, javaTiers, records);
+            VectorDb.compileIndexFile(filePath, planetId, planetRadius, dimension, javaTiers, records, qMode);
             return 0;
         } catch (Throwable t) {
             t.printStackTrace();

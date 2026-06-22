@@ -123,4 +123,48 @@ class VectorDbTest {
         // Clean up
         db.close();
     }
+
+    @Test
+    void testCompileAndQuery2BitIndex(@TempDir Path tempDir) throws IOException {
+        Path dbPath = tempDir.resolve("test_pithos_2bit");
+        int D = 128;
+        int[] tiers = {64, 128};
+        TransformOperator transformer = new TransformOperator(D, tiers);
+
+        // We want to verify that 2-bit mode successfully indexes and filters query noise
+        float[] vec0 = new float[128];
+        java.util.Arrays.fill(vec0, 0.5f);
+        // Ensure MSB is positive for QEG
+        float[] targetZ0 = transformer.preconditionAndRotate(vec0);
+        targetZ0[63] = 1.0f;
+        vec0 = transformer.backProject(targetZ0);
+
+        float[] vec1 = new float[128];
+        java.util.Arrays.fill(vec1, -0.5f);
+        float[] targetZ1 = transformer.preconditionAndRotate(vec1);
+        targetZ1[63] = 1.0f;
+        vec1 = transformer.backProject(targetZ1);
+
+        List<VectorRecord> records = List.of(
+            new VectorRecord(0, vec0),
+            new VectorRecord(1, vec1)
+        );
+
+        // Compile index with qMode = 1 (2-bit)
+        VectorDb.compileIndexFile(dbPath.toString(), (byte) 1, 1737400L, D, tiers, records, 1);
+
+        // Load index
+        VectorDb db = new VectorDb();
+        Index index = db.loadIndex("pithos_2bit_test", dbPath.toString(), null, 0);
+
+        assertNotNull(index);
+        assertEquals(2, index.size());
+
+        // Search with query vec0
+        List<Index.SearchResult> results = index.search(vec0, 2);
+        assertEquals(2, results.size());
+        assertEquals(0, results.get(0).id()); // Closest should be ID 0
+
+        db.close();
+    }
 }

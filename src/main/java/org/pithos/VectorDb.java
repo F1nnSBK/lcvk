@@ -64,6 +64,13 @@ public class VectorDb {
      * Compiles raw float records into a multi-tier, cache-aligned database file layout.
      */
     public static void compileIndexFile(String basePath, byte planetId, long planetRadius, int dimension, int[] tiers, List<VectorRecord> records) throws IOException {
+        compileIndexFile(basePath, planetId, planetRadius, dimension, tiers, records, 0);
+    }
+
+    /**
+     * Compiles raw float records into a multi-tier, cache-aligned database file layout with qMode.
+     */
+    public static void compileIndexFile(String basePath, byte planetId, long planetRadius, int dimension, int[] tiers, List<VectorRecord> records, int qMode) throws IOException {
         if (records == null || records.isEmpty()) {
             throw new IllegalArgumentException("Records list cannot be null or empty");
         }
@@ -96,6 +103,8 @@ public class VectorDb {
             for (int i = 0; i < tiers.length; i++) {
                 mapped.set(ValueLayout.JAVA_INT_UNALIGNED, 29 + (i * 4), tiers[i]);
             }
+            // Write qMode to offset 61
+            mapped.set(ValueLayout.JAVA_BYTE, 61, (byte) qMode);
             mapped.force();
         }
 
@@ -148,22 +157,41 @@ public class VectorDb {
                     StandardOpenOption.WRITE,
                     StandardOpenOption.READ,
                     StandardOpenOption.TRUNCATE_EXISTING);
-            tierMappeds[k] = tierChannels[k].map(FileChannel.MapMode.READ_WRITE, 0, totalRecords * (width / 8), Arena.global());
+            long bytesPerRecord = (qMode == 1) ? (width / 4) : (width / 8);
+            tierMappeds[k] = tierChannels[k].map(FileChannel.MapMode.READ_WRITE, 0, totalRecords * bytesPerRecord, Arena.global());
         }
 
         try {
             for (int i = 0; i < totalRecords; i++) {
                 VectorRecord rec = records.get(i);
-                long[] packed = transformer.transformAndQuantize(rec.vector());
-                
-                int longOffset = 0;
-                for (int k = 0; k < numTiers; k++) {
-                    int count = tierLongs[k];
-                    long baseOffset = i * (count * 8L);
-                    for (int l = 0; l < count; l++) {
-                        tierMappeds[k].set(ValueLayout.JAVA_LONG, baseOffset + (l * 8), packed[longOffset + l]);
+                if (qMode == 1) { // 2-bit mode
+                    float[] z = transformer.preconditionAndRotate(rec.vector());
+                    float threshold = TransformOperator.calculatePercentileThreshold(z, 0.20f);
+                    long[][] packed = transformer.quantize2Bit(z, threshold);
+                    long[] signPacked = packed[0];
+                    long[] maskPacked = packed[1];
+                    
+                    int longOffset = 0;
+                    for (int k = 0; k < numTiers; k++) {
+                        int count = tierLongs[k];
+                        long baseOffset = i * (count * 16L);
+                        for (int l = 0; l < count; l++) {
+                            tierMappeds[k].set(ValueLayout.JAVA_LONG, baseOffset + (l * 8), signPacked[longOffset + l]);
+                            tierMappeds[k].set(ValueLayout.JAVA_LONG, baseOffset + (count * 8L) + (l * 8), maskPacked[longOffset + l]);
+                        }
+                        longOffset += count;
                     }
-                    longOffset += count;
+                } else { // 1-bit mode
+                    long[] packed = transformer.transformAndQuantize(rec.vector());
+                    int longOffset = 0;
+                    for (int k = 0; k < numTiers; k++) {
+                        int count = tierLongs[k];
+                        long baseOffset = i * (count * 8L);
+                        for (int l = 0; l < count; l++) {
+                            tierMappeds[k].set(ValueLayout.JAVA_LONG, baseOffset + (l * 8), packed[longOffset + l]);
+                        }
+                        longOffset += count;
+                    }
                 }
             }
             for (int k = 0; k < numTiers; k++) {

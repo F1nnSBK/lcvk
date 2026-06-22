@@ -1,7 +1,0 @@
-{
-    "ffi_iterations": 100000,
-    "total_ffi_time_ms": 18.862458997318754,
-    "avg_ffi_latency_us": 0.18862458997318754,
-    "avg_python_overhead_us": 0.02939917001640424,
-    "net_ffi_overhead_us": 0.1592254199567833
-}
