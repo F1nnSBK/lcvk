@@ -191,8 +191,8 @@ def cleanup_index(db_file):
 
 DIMENSION = 384
 TIERS = np.array([64, 128, 256, 384], dtype=np.int32)
-K_VALUES = [1, 10, 50, 100]
-DB_FILE = "pithos_recall_test"
+K_VALUES = [1, 10, 50, 100, 500, 1000, 2000, 5000]
+DB_FILE = "temp/benchmark_data/pithos_recall_test"
 
 
 def main():
@@ -201,13 +201,13 @@ def main():
     print("=" * 72)
 
     # 1. Load real data
-    if not os.path.exists("queries.npy") or not os.path.exists("db_vectors_subset.npy"):
+    if not os.path.exists("temp/benchmark_data/queries.npy") or not os.path.exists("temp/benchmark_data/db_vectors_subset.npy"):
         print("[Error] queries.npy or db_vectors_subset.npy not found.")
         print("        Run ingest_pipeline.py and query_generator.py first.")
         sys.exit(1)
 
-    queries = np.load("queries.npy")
-    db_vectors = np.load("db_vectors_subset.npy")  # 10k unique real embeddings
+    queries = np.load("temp/benchmark_data/queries.npy")
+    db_vectors = np.load("temp/benchmark_data/db_vectors_subset.npy")  # 10k unique real embeddings
 
     num_records = db_vectors.shape[0]
     num_queries = queries.shape[0]
@@ -238,8 +238,8 @@ def main():
         sys.exit(1)
 
     # Load with real LoRA weights for authentic SVD energy computation
-    if os.path.exists("weights.npy"):
-        weights = np.load("weights.npy")
+    if os.path.exists("temp/benchmark_data/weights.npy"):
+        weights = np.load("temp/benchmark_data/weights.npy")
         print("done (using real LoRA weights)")
     else:
         q_mat, _ = np.linalg.qr(np.random.normal(size=(DIMENSION, DIMENSION)))
@@ -304,7 +304,7 @@ def main():
         )
 
     # 5. Export
-    metrics_path = "recall_metrics.json"
+    metrics_path = "temp/benchmark_data/recall_metrics.json"
     with open(metrics_path, "w") as f:
         json.dump({
             "dataset": "lunar_real_data",

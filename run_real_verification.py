@@ -5,7 +5,7 @@ import argparse
 import numpy as np
 from benchmark import PithosEngine
 
-DB_FILE = "lunar_real_data"
+DB_FILE = "temp/benchmark_data/lunar_real_data"
 DIMENSION = 384
 TIERS = np.array([64, 128, 256, 384], dtype=np.int32)
 
@@ -123,15 +123,15 @@ def main():
     
     # 1. Load queries, labels, and database for analysis
     print("Loading queries, labels, and database vectors...")
-    if not os.path.exists("queries.npy") or not os.path.exists("db_labels.npy") or not os.path.exists("db_vectors_subset.npy"):
+    if not os.path.exists("temp/benchmark_data/queries.npy") or not os.path.exists("temp/benchmark_data/db_labels.npy") or not os.path.exists("temp/benchmark_data/db_vectors_subset.npy"):
         print("[Error] Files missing. Please run ingest_pipeline.py and query_generator.py.")
         sys.exit(1)
         
     t_load_start = time.perf_counter()
-    queries = np.load("queries.npy")               # shape (278, 384)
-    db_labels = np.load("db_labels.npy")           # shape (1000000,)
-    db_vectors_subset = np.load("db_vectors_subset.npy") # shape (10000, 384)
-    weights = np.load("weights.npy")               # shape (384, 384)
+    queries = np.load("temp/benchmark_data/queries.npy")               # shape (278, 384)
+    db_labels = np.load("temp/benchmark_data/db_labels.npy")           # shape (1000000,)
+    db_vectors_subset = np.load("temp/benchmark_data/db_vectors_subset.npy") # shape (10000, 384)
+    weights = np.load("temp/benchmark_data/weights.npy")               # shape (384, 384)
     
     db_labels_subset = db_labels[:10000]
     
@@ -253,7 +253,7 @@ def main():
     voting_mask = np.zeros(total_records, dtype=np.uint8)
     
     # Update thresholds to the suggested value
-    families = np.load("families.npy")
+    families = np.load("temp/benchmark_data/families.npy")
     thresholds = np.full(queries.shape[0], best_threshold, dtype=np.int32)
     
     t_vote_start = time.perf_counter()
@@ -313,7 +313,7 @@ def main():
     
     # Save values to pithos_metrics.json
     import json
-    metrics_path = "pithos_metrics.json"
+    metrics_path = "temp/benchmark_data/pithos_metrics.json"
     metrics_data = {}
     if os.path.exists(metrics_path):
         try:

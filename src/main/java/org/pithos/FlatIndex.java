@@ -10,6 +10,8 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadFactory;
 import java.util.stream.IntStream;
@@ -56,6 +58,7 @@ public class FlatIndex implements Index {
     private final float[] cumulativeEnergy;
     private double targetEnergyBudget = 0.90; // Default energy threshold tau
     private final int qMode;
+    private final int[] tierLongs;
 
     // Disruptor context
     private final Disruptor<RangeEvent> disruptor;
@@ -158,6 +161,12 @@ public class FlatIndex implements Index {
         this.size = size;
         this.cumulativeEnergy = cumulativeEnergy;
         this.qMode = qMode;
+        this.tierLongs = new int[numTiers];
+        int prevBoundVal = 0;
+        for (int idx = 0; idx < numTiers; idx++) {
+            this.tierLongs[idx] = (tiers[idx] - prevBoundVal) / 64;
+            prevBoundVal = tiers[idx];
+        }
 
         this.transformOperator = new TransformOperator(dimension, tiers);
 
@@ -319,9 +328,13 @@ public class FlatIndex implements Index {
 
         int numQueries = queries.length;
 
-        // Allocate thread-local structures to hold top-K results
-        long[][][] threadLocalIds = new long[numWorkers][numQueries][k];
-        int[][][] threadLocalDists = new int[numWorkers][numQueries][k];
+        // Stage 1: Coarse Hamming/Ternary search returning candidates as internal row indices.
+        // We evaluate more candidates for reranking.
+        int kCandidate = (int) Math.min(numRecords, Math.max(100, 3 * k));
+
+        // Allocate thread-local structures to hold top-K candidates
+        long[][][] threadLocalIds = new long[numWorkers][numQueries][kCandidate];
+        int[][][] threadLocalDists = new int[numWorkers][numQueries][kCandidate];
 
         // Initialize distances to infinity
         for (int w = 0; w < numWorkers; w++) {
@@ -342,7 +355,7 @@ public class FlatIndex implements Index {
             long sequence = ringBuffer.next();
             try {
                 RangeEvent event = ringBuffer.get(sequence);
-                event.setKnn(startIdx, endIdx, queries, k, threadLocalIds, threadLocalDists, latch);
+                event.setKnn(startIdx, endIdx, queries, kCandidate, threadLocalIds, threadLocalDists, latch);
             } finally {
                 ringBuffer.publish(sequence);
             }
@@ -355,21 +368,29 @@ public class FlatIndex implements Index {
             throw new RuntimeException("Search execution was interrupted", e);
         }
 
-        // Merge thread-local results for each query
-        List<SearchResult>[] finalResults = new List[numQueries];
+        // Precondition and rotate queries to the same space as quantized vectors
+        float[][] zQueries = new float[numQueries][];
         for (int q = 0; q < numQueries; q++) {
+            zQueries[q] = transformOperator.preconditionAndRotate(queries[q]);
+        }
+
+        long idsAddr = idsSegment.address();
+
+        // Stage 2: Asymmetric Reranking (parallelized over queries to minimize latency)
+        List<SearchResult>[] finalResults = new List[numQueries];
+        IntStream.range(0, numQueries).forEach(q -> {
             List<SearchResult> merged = new ArrayList<>();
             for (int w = 0; w < numWorkers; w++) {
                 long[] ids = threadLocalIds[w][q];
                 int[] dists = threadLocalDists[w][q];
-                for (int i = 0; i < k; i++) {
+                for (int i = 0; i < kCandidate; i++) {
                     if (dists[i] != Integer.MAX_VALUE) {
                         merged.add(new SearchResult(ids[i], dists[i]));
                     }
                 }
             }
 
-            // Sort merged matches by distance (ascending)
+            // Sort merged matches by Stage 1 distance (ascending)
             merged.sort((r1, r2) -> {
                 int cmp = Integer.compare(r1.score(), r2.score());
                 if (cmp != 0)
@@ -377,20 +398,62 @@ public class FlatIndex implements Index {
                 return Long.compare(r1.id(), r2.id());
             });
 
-            // Keep top K
-            if (merged.size() > k) {
-                finalResults[q] = new ArrayList<>(merged.subList(0, k));
-            } else {
-                finalResults[q] = merged;
+            // Dedup candidates and keep the top kCandidate unique candidates
+            List<Long> candidates = new ArrayList<>();
+            Set<Long> seen = new HashSet<>();
+            for (SearchResult r : merged) {
+                long rowIdx = r.id();
+                if (seen.add(rowIdx)) {
+                    candidates.add(rowIdx);
+                    if (candidates.size() >= kCandidate) {
+                        break;
+                    }
+                }
             }
-        }
+
+            // Compute exact query L2 norm and sum for the distance offset
+            double queryL2Norm = 0.0;
+            double querySum = 0.0;
+            for (float val : zQueries[q]) {
+                queryL2Norm += val * val;
+                querySum += val;
+            }
+
+            // Rerank candidates using exact asymmetric float-ternary L2 distance
+            class RerankedCandidate {
+                final long rowIdx;
+                final double distance;
+                RerankedCandidate(long rowIdx, double distance) {
+                    this.rowIdx = rowIdx;
+                    this.distance = distance;
+                }
+            }
+
+            List<RerankedCandidate> reranked = new ArrayList<>();
+            for (long rowIdx : candidates) {
+                double dist = computeAsymmetricL2DistanceOffHeap(zQueries[q], queryL2Norm, querySum, rowIdx);
+                reranked.add(new RerankedCandidate(rowIdx, dist));
+            }
+
+            // Sort by distance (ascending)
+            reranked.sort((c1, c2) -> Double.compare(c1.distance, c2.distance));
+
+            // Select top K and resolve original record IDs
+            List<SearchResult> queryResults = new ArrayList<>();
+            int limit = Math.min(k, reranked.size());
+            for (int i = 0; i < limit; i++) {
+                RerankedCandidate c = reranked.get(i);
+                long recordId = UNSAFE.getLong(idsAddr + (c.rowIdx * 8));
+                queryResults.add(new SearchResult(recordId, (int) (c.distance * 1000000.0)));
+            }
+            finalResults[q] = queryResults;
+        });
 
         return finalResults;
     }
 
     private void executeKnnRange(long startIdx, long endIdx, float[][] queries, int k, long[][] myIds,
             int[][] myDists) {
-        long idsAddr = idsSegment.address();
         long metadataAddr = metadataSegment.address();
         int numQueries = queries.length;
 
@@ -423,12 +486,7 @@ public class FlatIndex implements Index {
             tierAddrs[i] = tierSegments[i].address();
         }
 
-        int[] tierLongs = new int[numTiers];
-        int prevBound = 0;
-        for (int i = 0; i < numTiers; i++) {
-            tierLongs[i] = (tiers[i] - prevBound) / 64;
-            prevBound = tiers[i];
-        }
+
 
         int totalLongs = dimension / 64;
         long[] dbWords = new long[totalLongs];
@@ -454,18 +512,10 @@ public class FlatIndex implements Index {
                     }
                 }
 
-                // Gate 2: QEG (Quantization Entropy Gating)
-                long t0Sign = dbWords[0];
-                long t0Mask = dbMasks[0];
-                if ((t0Mask & (1L << 63)) == 0L || (t0Sign & (1L << 63)) == 0L) {
-                    continue; // Early exit
-                }
+                // Gate 2: QEG bypassed for KNN search to avoid discarding valid neighbors
             } else { // 1-bit mode
-                // Gate 2: QEG
+                // Gate 2: QEG bypassed for KNN search to avoid discarding valid neighbors
                 long t0Val = UNSAFE.getLong(tierAddrs[0] + (i * 8));
-                if ((t0Val & (1L << 63)) == 0L) {
-                    continue; // Early exit -> Flat background terrain
-                }
 
                 dbWords[0] = t0Val;
                 int wordIdx = 1;
@@ -478,8 +528,6 @@ public class FlatIndex implements Index {
                     }
                 }
             }
-
-            long recordId = UNSAFE.getLong(idsAddr + (i * 8));
 
             // Gate 3: XOR-Popcount Cascade
             for (int q = 0; q < numQueries; q++) {
@@ -528,9 +576,84 @@ public class FlatIndex implements Index {
                         pos--;
                     }
                     dists[pos] = totalDist;
-                    ids[pos] = recordId;
+                    ids[pos] = i; // Save the internal row index
                 }
             }
+        }
+    }
+
+    private double computeAsymmetricL2DistanceOffHeap(float[] query, double queryL2Norm, double querySum, long rowIdx) {
+        int totalMaskPopcount = 0;
+        int queryOffsetLongs = 0;
+        
+        if (qMode == 1) { // 2-bit mode
+            double sumPositive = 0.0;
+            double sumActive = 0.0;
+            for (int tierIdx = 0; tierIdx < numTiers; tierIdx++) {
+                int numLongs = tierLongs[tierIdx];
+                long baseOffset = rowIdx * (numLongs * 16L);
+                long tAddr = tierSegments[tierIdx].address() + baseOffset;
+                
+                for (int l = 0; l < numLongs; l++) {
+                    long mask = UNSAFE.getLong(tAddr + (numLongs * 8L) + (l * 8));
+                    if (mask == 0L) {
+                        continue;
+                    }
+                    totalMaskPopcount += Long.bitCount(mask);
+                    long word = UNSAFE.getLong(tAddr + (l * 8));
+                    
+                    int bitOffset = (queryOffsetLongs + l) * 64;
+                    int limit = Math.min(64, query.length - bitOffset);
+                    long limitMask = limit == 64 ? -1L : (1L << limit) - 1L;
+                    long active = mask & limitMask;
+                    while (active != 0) {
+                        int bitIdx = Long.numberOfTrailingZeros(active);
+                        float qVal = query[bitOffset + bitIdx];
+                        sumActive += qVal;
+                        if (((word >>> bitIdx) & 1L) != 0L) {
+                            sumPositive += qVal;
+                        }
+                        active &= active - 1;
+                    }
+                }
+                queryOffsetLongs += numLongs;
+            }
+            return totalMaskPopcount + queryL2Norm - 4.0 * sumPositive + 2.0 * sumActive;
+        } else { // 1-bit mode
+            double sumPositive = 0.0;
+            // Tier 0
+            long t0Addr = tierSegments[0].address() + (rowIdx * 8);
+            long word0 = UNSAFE.getLong(t0Addr);
+            int limit0 = Math.min(64, query.length);
+            long limitMask0 = limit0 == 64 ? -1L : (1L << limit0) - 1L;
+            long active0 = word0 & limitMask0;
+            while (active0 != 0) {
+                int bitIdx = Long.numberOfTrailingZeros(active0);
+                sumPositive += query[bitIdx];
+                active0 &= active0 - 1;
+            }
+            
+            queryOffsetLongs = 1;
+            for (int tierIdx = 1; tierIdx < numTiers; tierIdx++) {
+                int numLongs = tierLongs[tierIdx];
+                long baseOffset = rowIdx * (numLongs * 8L);
+                long tAddr = tierSegments[tierIdx].address() + baseOffset;
+                
+                for (int l = 0; l < numLongs; l++) {
+                    long word = UNSAFE.getLong(tAddr + (l * 8));
+                    int bitOffset = (queryOffsetLongs + l) * 64;
+                    int limit = Math.min(64, query.length - bitOffset);
+                    long limitMask = limit == 64 ? -1L : (1L << limit) - 1L;
+                    long active = word & limitMask;
+                    while (active != 0) {
+                        int bitIdx = Long.numberOfTrailingZeros(active);
+                        sumPositive += query[bitOffset + bitIdx];
+                        active &= active - 1;
+                    }
+                }
+                queryOffsetLongs += numLongs;
+            }
+            return query.length + queryL2Norm + 2.0 * querySum - 4.0 * sumPositive;
         }
     }
 
@@ -642,12 +765,7 @@ public class FlatIndex implements Index {
             tierAddrs[i] = tierSegments[i].address();
         }
 
-        int[] tierLongs = new int[numTiers];
-        int prevBound = 0;
-        for (int i = 0; i < numTiers; i++) {
-            tierLongs[i] = (tiers[i] - prevBound) / 64;
-            prevBound = tiers[i];
-        }
+
 
         int totalLongs = dimension / 64;
         long[] dbWords = new long[totalLongs];

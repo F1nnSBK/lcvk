@@ -13,7 +13,8 @@ Um die Genauigkeit (Recall) flexibel an die Anforderungen der Anwendung anzupass
 * **MODE_1BIT (Standard):**
   * *Funktionsweise:* Speichert nur das Vorzeichen ($+1$ / $-1$).
   * *Eignung:* Maximale Geschwindigkeit, extrem geringe Speicherbandbreite. Ideal für Sonden und Edge-Hardware.
-* **MODE_2BIT (Ternary / Amplitude-Aware):**
+* **MODE_2BIT (Ternary / Amplitude-Aware) [UMGESETZT]:**
+  * *Status:* Vollständig implementiert und evaluiert (Stand: 23. Juni 2026).
   * *Funktionsweise:* Codiert pro Dimension zwei Bits, um drei Zustände abzubilden: $-1$, $0$ (Wert nahe Null / Rauschen) und $+1$.
   * *Eignung:* Deutlich höherer Recall, da dimensionale Störsignale (Rauschen) durch den Zustand $0$ maskiert werden. Geringfügiger Rechen-Overhead im Vergleich zu 1-Bit.
 * **MODE_FLOAT_HYBRID (Raw Bypass):**

@@ -17,7 +17,7 @@ from benchmark import PithosEngine
 # Configuration
 NUM_RECORDS = 1_000_000
 DIMENSION = 384
-DB_FILE = "lunar_real_data"
+DB_FILE = "temp/benchmark_data/lunar_real_data"
 TIERS = np.array([64, 128, 256, 384], dtype=np.int32)
 
 # Fixed seed for reproducibility
@@ -214,9 +214,9 @@ def main():
     print(f"Database successfully generated under base name: {DB_FILE}")
     
     # Save target metadata and weights for verification phase
-    np.save("db_labels.npy", db_labels)
-    np.save("weights.npy", weights)
-    np.save("db_vectors.npy", db_vectors)
+    np.save("temp/benchmark_data/db_labels.npy", db_labels)
+    np.save("temp/benchmark_data/weights.npy", weights)
+    # np.save("temp/benchmark_data/db_vectors.npy", db_vectors)
     
     if use_torch:
         # Save the raw embeddings of test pits for query generation
@@ -228,13 +228,13 @@ def main():
         q_norms = np.linalg.norm(test_pit_embeddings, axis=1, keepdims=True)
         q_norms[q_norms == 0] = 1.0
         test_pit_embeddings = test_pit_embeddings / q_norms
-        np.save("raw_pits.npy", test_pit_embeddings)
+        np.save("temp/benchmark_data/raw_pits.npy", test_pit_embeddings)
     else:
         # Fallback raw pits
-        np.save("raw_pits.npy", embeddings[labels == 1])
+        np.save("temp/benchmark_data/raw_pits.npy", embeddings[labels == 1])
     
     # Save first 10,000 raw float vectors for distance verification
-    np.save("db_vectors_subset.npy", db_vectors[:10000])
+    np.save("temp/benchmark_data/db_vectors_subset.npy", db_vectors[:10000])
 
 if __name__ == "__main__":
     main()

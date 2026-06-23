@@ -114,10 +114,10 @@ def get_lib_path():
 
 def main():
     # 1. Load actual data
-    db_vectors = np.load("db_vectors_subset.npy")
+    db_vectors = np.load("temp/benchmark_data/db_vectors_subset.npy")
     n_reps = 100000 // len(db_vectors)
     db_vectors = np.repeat(db_vectors, n_reps + 1, axis=0)[:100000].astype(np.float32)
-    queries = np.load("queries.npy").astype(np.float32)
+    queries = np.load("temp/benchmark_data/queries.npy").astype(np.float32)
     
     # 2. Compute Ground Truth (Top-10 exact L2 neighbors)
     index_faiss = faiss.IndexFlatL2(384)
@@ -128,7 +128,7 @@ def main():
     lib_path = get_lib_path()
     engine = PithosEngine(lib_path)
     
-    db_file = "pithos_temp_candidate_test"
+    db_file = "temp/benchmark_data/pithos_temp_candidate_test"
     tiers = np.array([64, 128, 256, 384], dtype=np.int32)
     ids = np.arange(100000, dtype=np.int64)
     
@@ -168,9 +168,9 @@ def main():
             os.remove(p)
             
     # Export metrics
-    with open("candidate_metrics.json", "w") as f:
+    with open("temp/benchmark_data/candidate_metrics.json", "w") as f:
         json.dump({"results": results}, f, indent=4)
-    print("Candidate generator metrics saved to candidate_metrics.json")
+    print("Candidate generator metrics saved to temp/benchmark_data/candidate_metrics.json")
     
     # 5. Plot trade-off Elbow Curve
     plt.style.use('dark_background')

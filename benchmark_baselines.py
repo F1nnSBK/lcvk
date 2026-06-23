@@ -15,15 +15,15 @@ def get_peak_memory_mb():
 
 def main():
     print("Loading actual lunar vectors and queries...")
-    if not os.path.exists("queries.npy"):
+    if not os.path.exists("temp/benchmark_data/queries.npy"):
         print("[Error] queries.npy not found. Run ingest_pipeline.py and query_generator.py first.")
         return
         
-    queries = np.load("queries.npy")       # shape (278, 384)
+    queries = np.load("temp/benchmark_data/queries.npy")       # shape (278, 384)
     
-    if os.path.exists("db_vectors_subset.npy"):
+    if os.path.exists("temp/benchmark_data/db_vectors_subset.npy"):
         print("Loading db_vectors_subset.npy and replicating to 100,000 records...")
-        db_vectors_subset = np.load("db_vectors_subset.npy") # shape (10000, 384)
+        db_vectors_subset = np.load("temp/benchmark_data/db_vectors_subset.npy") # shape (10000, 384)
         db_vectors = np.tile(db_vectors_subset, (10, 1))    # shape (100000, 384)
         # Inject micro-noise to break duplicate-based CPU branching prediction bias
         np.random.seed(42)
@@ -73,7 +73,7 @@ def main():
     seq_mem = get_peak_memory_mb()
     
     # Save baseline metrics
-    with open("baselines_metrics.json", "w") as f:
+    with open("temp/benchmark_data/baselines_metrics.json", "w") as f:
         json.dump({
             "faiss_mvps": faiss_mvps,
             "sequential_mvps": seq_mvps,
@@ -84,7 +84,7 @@ def main():
             "faiss_mem_mb": faiss_mem,
             "sequential_mem_mb": seq_mem
         }, f, indent=2)
-    print("Metrics saved to baselines_metrics.json")
+    print("Metrics saved to temp/benchmark_data/baselines_metrics.json")
     
 if __name__ == "__main__":
     main()

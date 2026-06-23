@@ -4,11 +4,11 @@ import numpy as np
 
 def main():
     # Load raw embeddings of pits saved by ingest_pipeline.py
-    if not os.path.exists("raw_pits.npy"):
+    if not os.path.exists("temp/benchmark_data/raw_pits.npy"):
         print("[Error] raw_pits.npy not found. Please run ingest_pipeline.py first.")
         sys.exit(1)
         
-    raw_pits = np.load("raw_pits.npy")
+    raw_pits = np.load("temp/benchmark_data/raw_pits.npy")
     print(f"Loaded {raw_pits.shape[0]} raw embeddings of lunar pits.")
     
     # Select 278 queries
@@ -33,9 +33,9 @@ def main():
     thresholds = np.full(num_queries, 40, dtype=np.int32)
     
     # Save arrays for the verification phase
-    np.save("queries.npy", queries_float)
-    np.save("families.npy", families)
-    np.save("thresholds.npy", thresholds)
+    np.save("temp/benchmark_data/queries.npy", queries_float)
+    np.save("temp/benchmark_data/families.npy", families)
+    np.save("temp/benchmark_data/thresholds.npy", thresholds)
     
     print(f"Generated {num_queries} queries partitioned across 8 families.")
     print("Queries saved successfully as float arrays.")

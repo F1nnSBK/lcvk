@@ -216,15 +216,15 @@ def main():
     print("=" * 72)
 
     # 1. Load real data
-    for f in ["queries.npy", "db_vectors_subset.npy", "families.npy", "thresholds.npy"]:
+    for f in ["temp/benchmark_data/queries.npy", "temp/benchmark_data/db_vectors_subset.npy", "temp/benchmark_data/families.npy", "temp/benchmark_data/thresholds.npy"]:
         if not os.path.exists(f):
             print(f"[Error] {f} not found. Run ingest_pipeline.py first.")
             sys.exit(1)
 
-    queries = np.load("queries.npy")             # (278, 384)
-    families = np.load("families.npy")            # (278,) int32, values 0-7
-    thresholds = np.load("thresholds.npy")        # (278,) int32
-    db_subset = np.load("db_vectors_subset.npy")  # (10000, 384)
+    queries = np.load("temp/benchmark_data/queries.npy")             # (278, 384)
+    families = np.load("temp/benchmark_data/families.npy")            # (278,) int32, values 0-7
+    thresholds = np.load("temp/benchmark_data/thresholds.npy")        # (278,) int32
+    db_subset = np.load("temp/benchmark_data/db_vectors_subset.npy")  # (10000, 384)
 
     # Replicate to 100k with micro-noise for scale parity with throughput benchmarks
     np.random.seed(42)
@@ -276,8 +276,8 @@ def main():
         print(f"\n[Error] compile failed: {status}")
         sys.exit(1)
 
-    if os.path.exists("weights.npy"):
-        weights = np.load("weights.npy")
+    if os.path.exists("temp/benchmark_data/weights.npy"):
+        weights = np.load("temp/benchmark_data/weights.npy")
     else:
         q_mat, _ = np.linalg.qr(np.random.normal(size=(DIMENSION, DIMENSION)))
         weights = q_mat.astype(np.float32)
@@ -323,16 +323,16 @@ def main():
     print(f"{'Backend':<{w1}} | {'Total Time (ms)':>{w2}} | {'Throughput (MVPS)':>{w3}} | {'Speedup':>{w4}}")
     print("-" * (w1 + w2 + w3 + w4 + 9))
     print(
-        f"{'FAISS Emulated Voting':<{w1}} | "
-        f"{t_faiss_best * 1000:>{w2}.2f} | "
-        f"{faiss_mvps:>{w3},.2f} | "
-        f"{'1.0x':>{w4}}"
+         f"{'FAISS Emulated Voting':<{w1}} | "
+         f"{t_faiss_best * 1000:>{w2}.2f} | "
+         f"{faiss_mvps:>{w3},.2f} | "
+         f"{'1.0x':>{w4}}"
     )
     print(
-        f"{'Pithos Native FFM Kernel':<{w1}} | "
-        f"{t_pithos_best * 1000:>{w2}.2f} | "
-        f"{pithos_mvps:>{w3},.2f} | "
-        f"{speedup:>{w4 - 1}.1f}x"
+         f"{'Pithos Native FFM Kernel':<{w1}} | "
+         f"{t_pithos_best * 1000:>{w2}.2f} | "
+         f"{pithos_mvps:>{w3},.2f} | "
+         f"{speedup:>{w4 - 1}.1f}x"
     )
     print("=" * 72)
 
@@ -361,9 +361,9 @@ def main():
         "speedup": round(speedup, 1),
     }
 
-    with open("voting_metrics.json", "w") as f:
+    with open("temp/benchmark_data/voting_metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
-    print("Metrics exported to voting_metrics.json")
+    print("Metrics exported to temp/benchmark_data/voting_metrics.json")
 
 
 if __name__ == "__main__":
