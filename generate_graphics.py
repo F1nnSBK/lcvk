@@ -174,12 +174,6 @@ def create_throughput_plot():
     
     # Highlight Pithos speedup dynamically compared to FAISS Flat L2
     speedup = best_mvps / faiss_mvps
-    ax.annotate(f'~{speedup:.0f}x speedup over FAISS Flat L2\nvia binary transforms & 3-Gate Cascade', 
-                xy=(best_mvps, 3.0), 
-                xytext=(min(1500, best_mvps - 1500), 2.0),
-                arrowprops=dict(arrowstyle="->", color=COLOR_PITHOS, lw=1.5),
-                color=COLOR_PITHOS, fontsize=10.5, fontweight='bold', 
-                bbox=dict(boxstyle="round,pad=0.6", fc=PANEL_BG, ec=BORDER_COLOR, alpha=0.9))
 
     os.makedirs('assets', exist_ok=True)
     out_svg = 'assets/throughput_comparison.svg'
