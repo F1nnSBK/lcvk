@@ -170,4 +170,98 @@ Um den Einfluss der On-Demand-Speicherladung der Tiers in `FlatIndex` zu quantif
 | Baseline (Vorabladen) | 1.0260 ms | 129.56 MVPS | 3,787.62 MVPS | 102.6x (vs. FAISS) |
 | **Optimiert (Lazy Loading)**| **0.8164 ms** | **167.33 MVPS** | **4,834.78 MVPS** | **131.7x (vs. FAISS)** |
 
+---
+
+## Ablation Study: Dimensions-Adaptive SIMD Dispatch (Step 4, Commit: `1717df3`)
+
+**Hypothese:** Für kleine Dimensionen (D ≤ 32) ist die 1-Bit-Hamming-Distanz eine schlechte Approximation. Jede Dimension trägt 3,125% zur Gesamtdistanz bei – ein falsches Vorzeichen-Bit dominiert das Ergebnis. Direkter VectorAPI-Float-L2 auf rekonstruierten ±1-Vektoren sollte deutlich höheren Recall liefern.
+
+**Änderung:** `FlatIndex.executeKnnRange` dispatcht bei `dimension <= 32 && qMode == 0` in den SIMD-Float-L2-Pfad; `TransformOperator.computeL2Float()` nutzt `jdk.incubator.vector`.
+
+### Erwartete Auswirkung (D ≤ 32, 100k Records)
+
+| Konfiguration | Recall@10 | Recall@100 | Single-Query Latenz | Bemerkung |
+| :--- | :---: | :---: | :---: | :--- |
+| Baseline (Hamming 1-Bit, D=32) | ~40–50% (geschätzt) | ~65% (geschätzt) | ~0.05 ms | Hamming auf 32 Bits: sehr ungenau |
+| **SIMD Float-L2 Dispatch (D=32)** | **~90–100%** | **~100%** | **~0.08 ms** | Exakte ±1 Rekonstruktion + L2 |
+
+> [!NOTE]
+> TODO: Benchmark mit `benchmark_recall.py --dim 32` – Ergebnisse eintragen sobald verfügbar.
+
+---
+
+## Ablation Study: QMODE_FLOAT_HYBRID – Raw Float32 Bypass (Step 1, Commit: `9f0bacd`)
+
+**Hypothese:** Für kleine Dimensionen (D ≤ 32) oder Szenarien mit maximaler Recall-Anforderung ist die vollständige Bit-Kompression kontraproduktiv. Das Speichern roher rotierter Float32-Werte (32× mehr Speicher als 1-Bit, aber exakte L2 ohne Quantisierungsrauschen) ermöglicht perfekten Recall bei vertretbarer Bandbreite.
+
+**Änderung:** `qMode=2` in `vdb_compile_index_file_v2` schreibt `width * 4` Bytes/Record; `FlatIndex.executeKnnRange` liest Float32 via `UNSAFE.getInt` direkt off-heap und berechnet exakte VectorAPI L2-Distanz.
+
+### Speicher- und Recall-Vergleich (D=32, 100k Records)
+
+| Modus | Bytes/Record | Index-Dateigröße (100k) | Erwarteter Recall@10 |
+| :--- | :---: | :---: | :---: |
+| QMode 0 (1-Bit) | 4 Bytes | ~0.4 MB | ~45% |
+| QMode 1 (2-Bit) | 8 Bytes | ~0.8 MB | ~65% |
+| **QMode 2 (Float32)** | **128 Bytes** | **~12.8 MB** | **~100%** |
+
+> [!NOTE]
+> TODO: Benchmark mit `python benchmark_recall.py --qmode 2 --dim 32` – Ergebnisse eintragen.
+
+---
+
+## Ablation Study: FP16 In-Engine Reranking (Step 2, Commit: `164c0bd`)
+
+**Hypothese:** Die bestehende asymmetrische Reranking-Stufe (float query vs. ±1/ternary DB) ist eine Approximation. Sie schätzt die L2-Distanz aus dem Vorzeichen/Masken-Code – das führt zu Fehlsortierungen innerhalb der Top-K Kandidaten. Durch Speichern der originalen Vektoren als FP16 (2 Bytes/Dim = 768 Bytes bei D=384 vs. 1536 Bytes FP32) und exaktes L2-Reranking sollte Recall@10 signifikant steigen.
+
+**Sidecar-Datei:** `_fp16.bin` (erzeugt bei `compileIndexFile`). Wenn vorhanden, wird sie beim Laden automatisch gemappt und in Stage 2 bevorzugt.
+
+**Änderung:** `computeExactL2FP16()` liest FP16-Werte via `UNSAFE.getShort` + `Float.float16ToFloat()` und berechnet exaktes L2.
+
+### Recall-Vergleich Stage-2 Reranking (D=384, 1-Bit, 100k Records)
+
+| Reranking-Strategie | Sidecar | Recall@10 | Recall@100 | Reranking-Latenz |
+| :--- | :---: | :---: | :---: | :---: |
+| Asymmetrisch (±1-Approximation) | Kein | 44.50% | 70.52% | ~0.2 ms (100k) |
+| **FP16 Exakt** | **_fp16.bin** | **TODO** | **TODO** | **~0.3 ms (geschätzt)** |
+
+> [!IMPORTANT]
+> TODO: `python benchmark_recall.py` nach `build.sh` – FP16-Sidecar wird automatisch erzeugt beim nächsten `ingest_pipeline.py`-Lauf.
+> FP16-Dateigröße bei 1M Vektoren, D=384: **768 MB** (vs. 1536 MB FP32).
+
+---
+
+## Ablation Study: LSM Delta-Buffer (Step 3, Commit: `b9a845f`)
+
+**Hypothese:** Echtzeit-Inserts ohne den immutable Hamming-Index zu berühren ermöglichen Low-Latency-Writes (<1 ms) auf Kosten eines leicht erhöhten Query-Overheads (Merge-Schritt).
+
+**Architektur:**
+```
+Query → [FlatIndex Base (Hamming Scan)] ──┐
+                                           ├→ Merge Top-K → Ausgabe
+      → [DeltaBuffer (Exact L2 Scan)] ──┘
+```
+
+**Neue C-API-Funktionen (8 Endpoints):**
+
+| Funktion | Beschreibung |
+| :--- | :--- |
+| `vdb_create_delta_buffer` | Erzeugt In-Memory-Buffer für einen Index |
+| `vdb_insert` | Fügt einen Vektor in den Buffer ein |
+| `vdb_delete_from_delta` | Soft-Delete (Tombstone) im Buffer |
+| `vdb_delta_size` | Anzahl lebendiger Einträge |
+| `vdb_needs_flush` | Prüft ob Flush-Threshold erreicht |
+| `vdb_search_merged` | Unified Search: Base + Delta, Top-K Merge |
+| `vdb_backup_delta` | Serialisiert Buffer in Binärdatei |
+| `vdb_restore_delta` | Stellt Buffer aus Backup wieder her |
+
+### Erwartete Insert- und Query-Latenz (D=384, Delta-Buffer mit 10k Vektoren)
+
+| Operation | Latenz | Bemerkung |
+| :--- | :---: | :--- |
+| `vdb_insert` (einzeln) | < 0.1 ms | Append in CopyOnWriteArrayList, kein Quantisierungs-Overhead |
+| `vdb_search_merged` (100k Base + 10k Delta) | ~1.2 ms | Delta Exact-L2 über 10k + Merge |
+| `vdb_backup_delta` (10k Einträge) | ~5–20 ms | DataOutputStream, I/O-bound |
+
+> [!NOTE]
+> TODO: Insert-Latenz mit Benchmark messen. Backup/Restore Round-Trip verifizieren.
 
