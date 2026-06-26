@@ -403,4 +403,200 @@ public class CApi {
         }
         return 0;
     }
+
+    // =========================================================================
+    // LSM Delta Buffer C-API
+    // =========================================================================
+
+    /**
+     * Creates an in-memory delta buffer for the named index.
+     * The buffer captures real-time inserts without touching the immutable base index files.
+     *
+     * @param flushThreshold soft limit on live entries; use vdb_needs_flush() to check
+     * @return 0 on success, -1 if db not init, -2 if index not found, -4 on error
+     */
+    @CEntryPoint(name = "vdb_create_delta_buffer")
+    public static int createDeltaBuffer(IsolateThread thread, CCharPointer indexName, int flushThreshold) {
+        if (db == null) return -1;
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            db.createDeltaBuffer(idxName, flushThreshold);
+            return 0;
+        } catch (IllegalArgumentException e) {
+            return -2;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Inserts a single float vector into the delta buffer for the given index.
+     *
+     * @return 0 on success, -1 if db not init, -2 if no delta buffer exists for the index, -4 on error
+     */
+    @CEntryPoint(name = "vdb_insert")
+    public static int insert(IsolateThread thread, CCharPointer indexName, long id,
+                             CFloatPointer vector) {
+        if (db == null) return -1;
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            Index index = db.getIndex(idxName);
+            if (index == null) return -2;
+            int dim = index.getDimension();
+            float[] javaVector = new float[dim];
+            for (int i = 0; i < dim; i++) {
+                javaVector[i] = vector.read(i);
+            }
+            boolean ok = db.insertIntoDelta(idxName, id, javaVector);
+            return ok ? 0 : -2;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Soft-deletes (tombstones) a record from the delta buffer.
+     *
+     * @return 1 if tombstoned, 0 if not found, -1 if db not init, -2 if no delta buffer
+     */
+    @CEntryPoint(name = "vdb_delete_from_delta")
+    public static int deleteFromDelta(IsolateThread thread, CCharPointer indexName, long id) {
+        if (db == null) return -1;
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            if (db.getDeltaBuffer(idxName) == null) return -2;
+            return db.deleteFromDelta(idxName, id) ? 1 : 0;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Returns the number of live (non-tombstoned) entries in the delta buffer.
+     *
+     * @return live entry count, or -1 if db not init, -2 if no delta buffer
+     */
+    @CEntryPoint(name = "vdb_delta_size")
+    public static long deltaSize(IsolateThread thread, CCharPointer indexName) {
+        if (db == null) return -1;
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            DeltaBuffer buf = db.getDeltaBuffer(idxName);
+            if (buf == null) return -2;
+            return buf.liveSize();
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Returns 1 if the delta buffer has reached its flush threshold, 0 otherwise.
+     *
+     * @return 1 if flush needed, 0 if not, -1 if db not init, -2 if no delta buffer
+     */
+    @CEntryPoint(name = "vdb_needs_flush")
+    public static int needsFlush(IsolateThread thread, CCharPointer indexName) {
+        if (db == null) return -1;
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            DeltaBuffer buf = db.getDeltaBuffer(idxName);
+            if (buf == null) return -2;
+            return buf.needsFlush() ? 1 : 0;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Performs a unified search across the base index and the delta buffer (if present),
+     * merging and returning the top-K results by score.
+     *
+     * @return 0 on success, -1 if db not init, -2 if index not found, -4 on error
+     */
+    @CEntryPoint(name = "vdb_search_merged")
+    public static int searchMerged(IsolateThread thread, CCharPointer indexName,
+                                   CFloatPointer query, int k,
+                                   CLongPointer outIds, CIntPointer outDistances) {
+        if (db == null) return -1;
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            Index index = db.getIndex(idxName);
+            if (index == null) return -2;
+
+            int dim = index.getDimension();
+            float[] javaQuery = new float[dim];
+            for (int i = 0; i < dim; i++) {
+                javaQuery[i] = query.read(i);
+            }
+
+            List<Index.SearchResult> results = db.searchMerged(idxName, javaQuery, k);
+            int count = results.size();
+            for (int i = 0; i < k; i++) {
+                if (i < count) {
+                    outIds.write(i, results.get(i).id());
+                    outDistances.write(i, results.get(i).score());
+                } else {
+                    outIds.write(i, -1L);
+                    outDistances.write(i, Integer.MAX_VALUE);
+                }
+            }
+            return 0;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Serializes the live entries of a delta buffer to a binary backup file.
+     * The backup can be restored with {@code vdb_restore_delta}.
+     *
+     * @return 0 on success, -1 if db not init, -2 if no delta buffer, -5 on I/O error
+     */
+    @CEntryPoint(name = "vdb_backup_delta")
+    public static int backupDelta(IsolateThread thread, CCharPointer indexName, CCharPointer path) {
+        if (db == null) return -1;
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            String filePath = CTypeConversion.toJavaString(path);
+            db.backupDelta(idxName, filePath);
+            return 0;
+        } catch (IllegalStateException e) {
+            return -2;
+        } catch (java.io.IOException e) {
+            return -5;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Restores a delta buffer from a backup file, replacing any existing buffer for the index.
+     *
+     * @param flushThreshold flush threshold for the restored buffer
+     * @return 0 on success, -1 if db not init, -2 if index not found, -5 on I/O error
+     */
+    @CEntryPoint(name = "vdb_restore_delta")
+    public static int restoreDelta(IsolateThread thread, CCharPointer indexName,
+                                   CCharPointer path, int flushThreshold) {
+        if (db == null) return -1;
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            if (db.getIndex(idxName) == null) return -2;
+            String filePath = CTypeConversion.toJavaString(path);
+            db.restoreDelta(idxName, filePath, flushThreshold);
+            return 0;
+        } catch (java.io.IOException e) {
+            return -5;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
 }

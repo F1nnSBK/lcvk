@@ -16,9 +16,12 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class VectorDb {
     private final Map<String, Index> indices;
+    /** Per-index optional write buffers (LSM delta layer). */
+    private final Map<String, DeltaBuffer> deltaBuffers;
 
     public VectorDb() {
         this.indices = new ConcurrentHashMap<>();
+        this.deltaBuffers = new ConcurrentHashMap<>();
     }
 
     /**
@@ -38,6 +41,7 @@ public class VectorDb {
     }
 
     public boolean dropIndex(String name) {
+        deltaBuffers.remove(name); // also drop associated delta buffer
         Index index = indices.remove(name);
         if (index != null) {
             try {
@@ -58,6 +62,117 @@ public class VectorDb {
             }
         }
         indices.clear();
+        deltaBuffers.clear();
+    }
+
+    // -------------------------------------------------------------------------
+    // Delta Buffer API (LSM layer)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Creates an in-memory delta buffer for the given index.
+     * The buffer enables real-time inserts without modifying the immutable base index.
+     *
+     * @param indexName      name of the base index
+     * @param flushThreshold soft limit on live entries before flush is recommended
+     * @return the new DeltaBuffer
+     * @throws IllegalArgumentException if the index does not exist
+     */
+    public DeltaBuffer createDeltaBuffer(String indexName, int flushThreshold) {
+        Index index = indices.get(indexName);
+        if (index == null) throw new IllegalArgumentException("Unknown index: " + indexName);
+        DeltaBuffer buf = new DeltaBuffer(index.getDimension(), flushThreshold);
+        deltaBuffers.put(indexName, buf);
+        return buf;
+    }
+
+    /** Returns the delta buffer for the given index, or null if none exists. */
+    public DeltaBuffer getDeltaBuffer(String indexName) {
+        return deltaBuffers.get(indexName);
+    }
+
+    /**
+     * Inserts a vector into the delta buffer for the given index.
+     *
+     * @return true on success, false if no delta buffer is registered
+     */
+    public boolean insertIntoDelta(String indexName, long id, float[] vector) {
+        DeltaBuffer buf = deltaBuffers.get(indexName);
+        if (buf == null) return false;
+        buf.insert(id, vector);
+        return true;
+    }
+
+    /**
+     * Soft-deletes a record from the delta buffer (tombstone).
+     *
+     * @return true if at least one entry was tombstoned
+     */
+    public boolean deleteFromDelta(String indexName, long id) {
+        DeltaBuffer buf = deltaBuffers.get(indexName);
+        if (buf == null) return false;
+        return buf.delete(id);
+    }
+
+    /**
+     * Backs up the live entries of the delta buffer to a binary file.
+     *
+     * @param indexName name of the index whose delta buffer to back up
+     * @param path      target file path
+     * @throws IOException              on I/O failure
+     * @throws IllegalStateException    if no delta buffer exists for the index
+     */
+    public void backupDelta(String indexName, String path) throws IOException {
+        DeltaBuffer buf = deltaBuffers.get(indexName);
+        if (buf == null) throw new IllegalStateException("No delta buffer for index: " + indexName);
+        buf.serializeToPath(path);
+    }
+
+    /**
+     * Restores a delta buffer from a previously backed-up binary file.
+     * Replaces any existing delta buffer for the index.
+     *
+     * @param indexName      name of the index
+     * @param path           path to the backup file
+     * @param flushThreshold flush threshold for the restored buffer
+     * @throws IOException on I/O failure
+     */
+    public void restoreDelta(String indexName, String path, int flushThreshold) throws IOException {
+        DeltaBuffer buf = DeltaBuffer.deserializeFromPath(path, flushThreshold);
+        deltaBuffers.put(indexName, buf);
+    }
+
+    /**
+     * Performs a unified search that queries both the base index and the delta buffer,
+     * merges the results, and returns the top-K by score.
+     *
+     * @param indexName name of the index
+     * @param query     raw float query vector
+     * @param k         number of results
+     * @return merged top-K results
+     */
+    public List<Index.SearchResult> searchMerged(String indexName, float[] query, int k) {
+        Index index = indices.get(indexName);
+        if (index == null) throw new IllegalArgumentException("Unknown index: " + indexName);
+
+        List<Index.SearchResult> baseResults = index.search(query, k);
+
+        DeltaBuffer buf = deltaBuffers.get(indexName);
+        if (buf == null || buf.liveSize() == 0) {
+            return baseResults;
+        }
+
+        List<Index.SearchResult> deltaResults = buf.searchKnn(query, k);
+
+        // Merge and deduplicate by ID, then take top-K by score
+        java.util.Map<Long, Index.SearchResult> merged = new java.util.LinkedHashMap<>();
+        for (Index.SearchResult r : baseResults)  merged.put(r.id(), r);
+        for (Index.SearchResult r : deltaResults) merged.putIfAbsent(r.id(), r);
+
+        return merged.values().stream()
+                .sorted((a, b) -> Integer.compare(a.score(), b.score()))
+                .limit(k)
+                .toList();
     }
 
     /**
