@@ -309,26 +309,20 @@ Pithos is specifically designed for hybrid CPU-FPGA/GPU acceleration workflows, 
 
 ## Precompiled Native Libraries
 
-If you don't want to build Pithos yourself, you can download the latest precompiled native libraries generated automatically by GitHub Actions.
+Precompiled native libraries are automatically published as GitHub Release assets after successful builds on the `main` branch and for version tags (`v*`).
 
-| Platform | Library | Download |
-|----------|---------|----------|
-| Linux (x86_64) | `libpithos-linux-x86_64.so` | https://nightly.link/F1nnSBK/lcvk/workflows/build-and-release-native-binaries/main/pithos-binaries-ubuntu-latest.zip |
-| macOS (Apple Silicon) | `libpithos-macos-aarch64.dylib` | https://nightly.link/F1nnSBK/lcvk/workflows/build-and-release-native-binaries/main/pithos-binaries-macos-latest.zip |
+Download the latest release:
 
-Each archive contains the compiled shared library inside the `build-binaries/` directory.
+https://github.com/F1nnSBK/lcvk/releases/latest
 
-### Alternative: GitHub Actions
+Each release contains:
 
-You can also download the artifacts directly from GitHub:
+- `libpithos-linux-x86_64.so` — Linux (x86_64)
+- `libpithos-macos-aarch64.dylib` — macOS (Apple Silicon)
+- `pithos.h` — C API header
+- `graal_isolate.h` — GraalVM Native Image header
 
-1. Open the repository's **Actions** page.
-2. Select the latest successful **Build and Release Native Binaries** workflow.
-3. Scroll to **Artifacts**.
-4. Download the archive matching your platform.
-5. Extract it and use the shared library from `build-binaries/`.
-
-> **Note:** New binaries are generated automatically for every push to `main` and for every version tag (`v*`).
+These binaries can be used directly without installing GraalVM or building the project from source.
 
 ---
 
