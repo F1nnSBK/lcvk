@@ -34,40 +34,41 @@ fi
 
 # Discipline 1: General-Purpose KNN Search
 echo -e "${BLUE}=== Step 1/9: Baseline Benchmarks (JIT loop & FAISS) ===${NC}"
-$PYTHON_BIN benchmark_baselines.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/benchmark_baselines.py
 
 echo -e "\n${BLUE}=== Step 2/9: Pithos Scale Performance Benchmark ===${NC}"
 $PYTHON_BIN benchmark.py
 
 echo -e "\n${BLUE}=== Step 3/9: Recall@K -- Speed-Accuracy Trade-Off ===${NC}"
-$PYTHON_BIN benchmark_recall.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/benchmark_recall.py
 
 # Discipline 2: Application-Specific Resonant Voting
 echo -e "\n${BLUE}=== Step 4/9: Resonant Voting Stress-Test (Pithos vs FAISS Emulated) ===${NC}"
-$PYTHON_BIN benchmark_voting.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/benchmark_voting.py
 
 # Dimensionality Crossover Sweep
 echo -e "\n${BLUE}=== Step 5/9: Crossover Sweep (Single vs Multi Query x Dimensions) ===${NC}"
-$PYTHON_BIN benchmark_sweep.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/benchmark_sweep.py
 
 # SIFT10K Generalization Benchmark
 echo -e "\n${BLUE}=== Step 6/9: SIFT10K Generalization Benchmark ===${NC}"
-$PYTHON_BIN benchmark_sift.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/benchmark_sift.py
 
 # FFI Boundary Analysis
 echo -e "\n${BLUE}=== Step 7/9: FFI Boundary Analysis ===${NC}"
-$PYTHON_BIN benchmark_ffi.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/benchmark_ffi.py
 
 # Candidate Generation Recall (Workload Reduction Elbow Curve)
 echo -e "\n${BLUE}=== Step 8/9: Downstream Workload Reduction & Recall Elbow Curve ===${NC}"
-$PYTHON_BIN benchmark_candidate_recall.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/benchmark_candidate_recall.py
 
 # Ablation & LSM Delta-Buffer Benchmarks (SIMD, QMode, FP16, DeltaBuffer)
 echo -e "\n${BLUE}=== Step 9/9: Pithos Ablation & LSM Delta-Buffer Benchmarks ===${NC}"
-$PYTHON_BIN run_ablation_benchmarks.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/run_ablation_benchmarks.py
 
 # Finalize: regenerate all plots and update README.md
 echo -e "\n${BLUE}=== Updating README.md with live benchmark results ===${NC}"
-$PYTHON_BIN generate_graphics.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/generate_graphics.py
+
 
 echo -e "\n${GREEN}=== One-Click Benchmark Complete! ===${NC}"

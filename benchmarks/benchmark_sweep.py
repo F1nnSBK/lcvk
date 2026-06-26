@@ -7,175 +7,9 @@ import numpy as np
 import faiss
 import matplotlib.pyplot as plt
 
-import contextlib
-
-
-@contextlib.contextmanager
-def suppress_stderr():
-    sys.stderr.flush()
-    err_fd = sys.stderr.fileno()
-    saved_stderr_fd = os.dup(err_fd)
-    null_fd = os.open(os.devnull, os.O_RDWR)
-    os.dup2(null_fd, err_fd)
-    os.close(null_fd)
-    try:
-        yield
-    finally:
-        os.dup2(saved_stderr_fd, err_fd)
-        os.close(saved_stderr_fd)
-
-
-class GraalIsolate(ctypes.Structure):
-    pass
-
-
-class GraalIsolateThread(ctypes.Structure):
-    pass
-
-
-class PithosEngine:
-    """Minimal ctypes wrapper for the AOT-compiled Pithos native library."""
-
-    def __init__(self, lib_path: str):
-        if not os.path.exists(lib_path):
-            raise FileNotFoundError(f"Native shared library not found at: {lib_path}")
-
-        self.lib = ctypes.CDLL(lib_path)
-        self.isolate = ctypes.POINTER(GraalIsolate)()
-        self.thread = ctypes.POINTER(GraalIsolateThread)()
-
-        self.lib.graal_create_isolate.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.POINTER(GraalIsolate)),
-            ctypes.POINTER(ctypes.POINTER(GraalIsolateThread)),
-        ]
-        self.lib.graal_create_isolate.restype = ctypes.c_int
-
-        self.lib.graal_tear_down_isolate.argtypes = [ctypes.c_void_p]
-        self.lib.graal_tear_down_isolate.restype = ctypes.c_int
-
-        self.lib.vdb_init.argtypes = [ctypes.c_void_p]
-        self.lib.vdb_init.restype = ctypes.c_int
-
-        self.lib.vdb_load_index.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p,
-        ]
-        self.lib.vdb_load_index.restype = ctypes.c_int
-
-        self.lib.vdb_load_index_with_weights = getattr(self.lib, "vdb_load_index_with_weights", None)
-        if self.lib.vdb_load_index_with_weights is not None:
-            self.lib.vdb_load_index_with_weights.argtypes = [
-                ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p,
-                ctypes.c_void_p, ctypes.c_int,
-            ]
-            self.lib.vdb_load_index_with_weights.restype = ctypes.c_int
-
-        self.lib.vdb_batch_search.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p,
-            ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
-        ]
-        self.lib.vdb_batch_search.restype = ctypes.c_int
-
-        self.lib.vdb_compile_index_file.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_byte, ctypes.c_longlong,
-            ctypes.c_int, ctypes.c_void_p, ctypes.c_int,
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
-        ]
-        self.lib.vdb_compile_index_file.restype = ctypes.c_int
-
-        self.lib.vdb_close.argtypes = [ctypes.c_void_p]
-        self.lib.vdb_close.restype = ctypes.c_int
-
-        self.lib.vdb_set_chunk_size = getattr(self.lib, "vdb_set_chunk_size", None)
-        if self.lib.vdb_set_chunk_size is not None:
-            self.lib.vdb_set_chunk_size.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_longlong]
-            self.lib.vdb_set_chunk_size.restype = ctypes.c_int
-
-        with suppress_stderr():
-            status = self.lib.graal_create_isolate(
-                None, ctypes.byref(self.isolate), ctypes.byref(self.thread)
-            )
-        if status != 0:
-            raise RuntimeError("Failed to allocate GraalVM isolate thread.")
-
-        with suppress_stderr():
-            status = self.lib.vdb_init(self.thread)
-        if status != 0:
-            raise RuntimeError("Failed to initialize Pithos DB engine.")
-
-    def compile_index_file(
-        self, file_path: str, planet_id: int, planet_radius: int,
-        dimension: int, tiers: np.ndarray, ids: np.ndarray, vectors: np.ndarray,
-    ) -> int:
-        path_bytes = file_path.encode("utf-8")
-        with suppress_stderr():
-            return self.lib.vdb_compile_index_file(
-                self.thread, path_bytes, planet_id, planet_radius, dimension,
-                tiers.ctypes.data_as(ctypes.c_void_p), len(tiers),
-                ids.ctypes.data_as(ctypes.c_void_p),
-                vectors.ctypes.data_as(ctypes.c_void_p), len(ids),
-            )
-
-    def load_index(
-        self, index_name: str, file_path: str,
-        weights: np.ndarray = None, lora_dim: int = 0,
-    ) -> int:
-        name_bytes = index_name.encode("utf-8")
-        path_bytes = file_path.encode("utf-8")
-        if weights is not None and self.lib.vdb_load_index_with_weights is not None:
-            with suppress_stderr():
-                return self.lib.vdb_load_index_with_weights(
-                    self.thread, name_bytes, path_bytes,
-                    weights.ctypes.data_as(ctypes.c_void_p), lora_dim,
-                )
-        with suppress_stderr():
-            return self.lib.vdb_load_index(self.thread, name_bytes, path_bytes)
-
-    def batch_search(self, index_name: str, queries: np.ndarray, k: int) -> tuple:
-        num_queries = queries.shape[0]
-        out_ids = np.zeros(num_queries * k, dtype=np.int64)
-        out_distances = np.zeros(num_queries * k, dtype=np.int32)
-        with suppress_stderr():
-            status = self.lib.vdb_batch_search(
-                self.thread, index_name.encode("utf-8"),
-                queries.ctypes.data_as(ctypes.c_void_p), num_queries, k,
-                out_ids.ctypes.data_as(ctypes.c_void_p),
-                out_distances.ctypes.data_as(ctypes.c_void_p),
-            )
-        if status != 0:
-            raise RuntimeError(f"Search failed with code: {status}")
-        return out_ids, out_distances
-
-    def set_chunk_size(self, index_name: str, chunk_size: int) -> int:
-        if self.lib.vdb_set_chunk_size is not None:
-            name_bytes = index_name.encode("utf-8")
-            with suppress_stderr():
-                return self.lib.vdb_set_chunk_size(self.thread, name_bytes, chunk_size)
-        return 0
-
-    def close(self):
-        if self.thread:
-            self.lib.vdb_close(self.thread)
-            self.thread = None
-            self.isolate = None
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def get_native_lib_path() -> str:
-    import platform
-    ext = "dylib" if platform.system() == "Darwin" else "so"
-    candidates = [
-        f"./target/libpithos.{ext}",
-        f"./build-output/libpithos.{ext}",
-        f"./libpithos.{ext}",
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            return p
-    raise FileNotFoundError("Pithos native library not found.")
+# PYTHONPATH fallback and PithosMIDB Import
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from benchmark import PithosMIDB
 
 
 def generate_hypersphere_vectors(n: int, dim: int) -> np.ndarray:
@@ -219,7 +53,7 @@ def cleanup_index_files(db_file: str):
 # ---------------------------------------------------------------------------
 
 def run_pithos_search(
-    lib_path: str, db_vectors: np.ndarray, queries: np.ndarray,
+    db_vectors: np.ndarray, queries: np.ndarray,
     dim: int, k: int,
 ) -> float:
     """Compile, load, warmup, time a Pithos batch search. Returns seconds."""
@@ -230,7 +64,7 @@ def run_pithos_search(
         db_vectors = np.pad(db_vectors, ((0, 0), (0, 64 - dim)), mode="constant")
         queries = np.pad(queries, ((0, 0), (0, 64 - dim)), mode="constant")
 
-    engine = PithosEngine(lib_path)
+    engine = PithosMIDB()
     db_file = f"pithos_sweep_dim_{dim}"
     ids = np.arange(db_vectors.shape[0], dtype=np.int64)
 
@@ -292,7 +126,6 @@ def main():
     print("=" * 72)
     print("    PITHOS vs FAISS -- Dimensionality Crossover Sweep")
     print("=" * 72)
-    lib_path = get_native_lib_path()
     np.random.seed(42)
 
     sweep_results = []
@@ -305,7 +138,7 @@ def main():
         q_single = generate_hypersphere_vectors(NUM_QUERIES_SINGLE, dim)
 
         print(f"  [A] Single-Query (N=1) ...", end=" ", flush=True)
-        t_pithos_single = run_pithos_search(lib_path, db_vectors, q_single, dim, K)
+        t_pithos_single = run_pithos_search(db_vectors, q_single, dim, K)
         t_faiss_single = run_faiss_search(db_vectors, q_single, dim, K)
 
         pithos_lat_us = t_pithos_single * 1e6
@@ -321,7 +154,7 @@ def main():
         q_multi = generate_hypersphere_vectors(NUM_QUERIES_MULTI, dim)
 
         print(f"  [B] Multi-Query  (N={NUM_QUERIES_MULTI}) ...", end=" ", flush=True)
-        t_pithos_multi = run_pithos_search(lib_path, db_vectors, q_multi, dim, K)
+        t_pithos_multi = run_pithos_search(db_vectors, q_multi, dim, K)
         t_faiss_multi = run_faiss_search(db_vectors, q_multi, dim, K)
 
         total_comparisons = NUM_RECORDS * NUM_QUERIES_MULTI
@@ -352,9 +185,11 @@ def main():
     # Export telemetry
     # ------------------------------------------------------------------
     metrics = {"dimensionality_sweep": sweep_results}
-    with open("pithos_sweep_metrics.json", "w") as f:
+    os.makedirs("temp/benchmark_data", exist_ok=True)
+    metrics_path = "temp/benchmark_data/pithos_sweep_metrics.json"
+    with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)
-    print("\nMetrics exported to pithos_sweep_metrics.json")
+    print(f"\nMetrics exported to {metrics_path}")
 
     # ------------------------------------------------------------------
     # Consolidated Crossover Report

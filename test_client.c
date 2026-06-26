@@ -71,7 +71,7 @@ int main() {
     printf("[C Client] Compiling test binary vector file 'pithos_test.bin'...\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
     // Planet ID = 1 (Moon), Radius = 1737400 meters
-    status = vdb_compile_index_file(thread, "pithos_test.bin", (char)1, 1737400LL, dimension, tiers, num_tiers, ids, vectors, num_records);
+    status = vdb_compile_index_file(thread, "pithos_test.bin", (char)1, 1737400LL, dimension, tiers, num_tiers, ids, vectors, num_records, 0);
     if (status != 0) {
         fprintf(stderr, "[C Client] Index compilation failed (code: %d)\n", status);
         free(vectors);

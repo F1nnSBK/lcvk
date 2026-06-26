@@ -355,19 +355,6 @@ public class CApi {
     }
 
     /**
-     * Compiles raw float records into a multi-tier database file layout.
-     * Legacy wrapper delegating to {@link #compileIndexFileV2} with default 1-bit
-     * quantization (qMode=0).
-     */
-    @CEntryPoint(name = "vdb_compile_index_file")
-    public static int compileIndexFile(IsolateThread thread, CCharPointer path, byte planetId, long planetRadius,
-            int dimension, CIntPointer tiers, int numTiers,
-            CLongPointer ids, CFloatPointer vectors, int numRecords) {
-        return compileIndexFileV2(thread, path, planetId, planetRadius, dimension, tiers, numTiers, ids, vectors,
-                numRecords, 0);
-    }
-
-    /**
      * Compiles raw float records into a multi-tier database file layout with
      * configurable quantization.
      * This method writes the core config header, IDs file, metadata file, tier
@@ -393,8 +380,8 @@ public class CApi {
      *                     float32 bypass
      * @return 0 on success, or -4 on internal exception
      */
-    @CEntryPoint(name = "vdb_compile_index_file_v2")
-    public static int compileIndexFileV2(IsolateThread thread, CCharPointer path, byte planetId, long planetRadius,
+    @CEntryPoint(name = "vdb_compile_index_file")
+    public static int compileIndexFile(IsolateThread thread, CCharPointer path, byte planetId, long planetRadius,
             int dimension, CIntPointer tiers, int numTiers,
             CLongPointer ids, CFloatPointer vectors, int numRecords, int qMode) {
         try {

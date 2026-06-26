@@ -27,13 +27,13 @@ else
 fi
 
 echo -e "\n${BLUE}=== Phase 1: Real-World Data Ingestion & Setup ===${NC}"
-$PYTHON_BIN ingest_pipeline.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/ingest_pipeline.py
 
 echo -e "\n${BLUE}=== Phase 2: Generating Queries ===${NC}"
-$PYTHON_BIN query_generator.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/query_generator.py
 
 echo -e "\n${BLUE}=== Phase 3: Real Data Verification & Evaluation ===${NC}"
-$PYTHON_BIN run_real_verification.py
+PYTHONPATH=. $PYTHON_BIN benchmarks/run_real_verification.py
 
 echo -e "\n${BLUE}=== Phase 4: Running Full Benchmarks & Baselines ===${NC}"
 bash run_benchmark.sh

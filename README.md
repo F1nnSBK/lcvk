@@ -148,9 +148,11 @@ $$\text{popcount}(V_i^{\text{merged}}) \ge K_{\text{vote}} \quad \text{where } K
 ├── build.sh                # Docker build script (exports compiled Linux library)
 ├── run_benchmark.sh        # One-click benchmark (reproducible results)
 ├── test_client.c           # C verification client calling Pithos float C-API
-├── verify_scale.sh         # Scale stress-test wrapper script
-├── benchmark.py            # Python ctypes performance sweep and verification
-├── run_real_verification.py# Real-data MNIST/DINOv3 verification pipeline
+├── benchmark.py            # Central Python API Wrapper (PithosMIDB singleton)
+├── benchmarks/             # All evaluation, sweep, and verification scripts
+│   ├── run_real_verification.py # Lunar Pit / adapter classification pipeline
+│   ├── benchmark_baselines.py   # JIT loop and FAISS baseline comparison
+│   └── ...                 # Sweeps, candidate recall, and FFI benchmarks
 ├── examples/               # Developer integration demos
 │   ├── cpp/demo.c          # C integration demo linking libpithos
 │   └── java/ZeroCostDemo.java# FFM Panama off-heap GC bypass demo
@@ -200,11 +202,14 @@ int vdb_load_index_with_weights(graal_isolatethead_t* thread, char* name, char* 
 // Retrieves database metadata attributes (dimension, size, planet settings, tiers count)
 int vdb_get_info(graal_isolatethead_t* thread, char* indexName, int* outDimension, long long* outSize, char* outPlanetId, long long* outPlanetRadius, int* outTiersCount);
 
-// Compiles raw float records into a multi-tier database file layout (quantization mode 0 by default)
-int vdb_compile_index_file(graal_isolatethead_t* thread, char* path, byte planetId, long long planetRadius, int dimension, int* tiers, int numTiers, long long* ids, float* vectors, int numRecords);
+// Compiles raw float records into a multi-tier database file layout with configurable quantization (qMode: 0=1-bit, 1=2-bit, 2=FP32 bypass)
+int vdb_compile_index_file(graal_isolatethead_t* thread, char* path, byte planetId, long long planetRadius, int dimension, int* tiers, int numTiers, long long* ids, float* vectors, int numRecords, int qMode);
 
-// Compiles raw float records into a multi-tier database file layout with configurable quantization (qMode: 0=1-bit, 1=2-bit, 2=float32)
-int vdb_compile_index_file_v2(graal_isolatethead_t* thread, char* path, byte planetId, long long planetRadius, int dimension, int* tiers, int numTiers, long long* ids, float* vectors, int numRecords, int qMode);
+// Retrieves the raw off-heap virtual memory address and length of a specific index tier (FPGA/DMA direct access)
+int vdb_get_tier_address(graal_isolatethead_t* thread, char* indexName, int tierIdx, long long* outAddress, long long* outLength);
+
+// Binarizes a single float vector using the index's Walsh-Hadamard preconditioning (asymmetric offloading)
+int vdb_transform_and_quantize(graal_isolatethead_t* thread, char* indexName, float* inVector, long long* outPacked);
 
 // Batch KNN search over raw float vectors
 int vdb_batch_search(graal_isolatethead_t* thread, char* indexName, float* queries, int numQueries, int k, long long* outIds, int* outDistances);
@@ -259,10 +264,10 @@ int vdb_restore_delta(graal_isolatethead_t* thread, char* indexName, char* backu
 ### C-API Configuration Guide
 
 #### 1. Quantization & Formats (`qMode`)
-Configured during compilation via the `qMode` parameter in `vdb_compile_index_file_v2`. The mode is saved in the header and automatically applied at load time:
+Configured during compilation via the `qMode` parameter in `vdb_compile_index_file`. The mode is saved in the header and automatically applied at load time:
 - **`0`**: 1-bit sign-only (highest compression).
 - **`1`**: 2-bit ternary (active mask + signs, enabling exact asymmetric binary/ternary distance estimators).
-- **`2`**: Float-hybrid raw bypass (skips quantization, saves raw rotated float32 values for low dimensions).
+- **`2`**: FP32 raw bypass (skips quantization, saves raw rotated 32-bit floating point values for low dimensions).
 
 #### 2. FP16 Stage 2 Reranking
 When you compile an index, Pithos automatically exports the raw vectors in IEEE 754 half-precision to a sidecar file named `<basePath>_fp16.bin`. 
@@ -274,91 +279,17 @@ When you compile an index, Pithos automatically exports the raw vectors in IEEE 
 - **Information Budget ($\tau$)**: Change the dynamic pruning threshold on the fly via `vdb_set_energy_budget`. E.g., setting $\tau = 0.90$ bypasses columns corresponding to less significant singular vectors, reducing memory bandwidth usage.
 - **Parallel Chunk Size**: Optimize Disruptor worker granularity using `vdb_set_chunk_size`.
 
+#### 4. FPGA / Custom Hardware Acceleration (Co-Design)
+Pithos is specifically designed for hybrid CPU-FPGA/GPU acceleration workflows, where the host CPU handles the application orchestration and the hardware accelerator performs massive Hamming sweeps:
+- **Zero-Copy DMA Acceleration (`vdb_get_tier_address`)**: Custom PCIe hardware kernels or FPGA DMA controllers can retrieve the exact virtual off-heap memory-mapped address and length of specific tier buffers. Because these buffers are read-only, cache-aligned, and contiguous, they can be streamed directly into custom acceleration engines via DMA, bypassing Java GC, JVM boundaries, and CPU overhead.
+- **Asymmetric Vector Offloading (`vdb_transform_and_quantize`)**: A host system can quickly transform and binarize incoming query vectors on the CPU using Pithos's Rademacher preconditioning and Walsh-Hadamard rotations. The resulting query bit vectors can then be passed to the FPGA/GPU to perform low-latency binary Hamming distance sweeps directly against the raw off-heap database buffers.
+
 
 ---
 
 ## System Verification & Performance Results
 
-### 1. Real-Data Verification (Real Lunar Pits Dataset, Mode B — Fine-Tuned DINOv3 + Lunar LoRA Adapter)
-
-Pithos transforms, binarizes, and indexes raw float vectors into 384-bit Matryoshka-structured binary embeddings. Evaluation is performed natively on the macOS host to eliminate virtualization context-switch latencies.
-
-- **Target Class:** Lunar Pit/Cave Entrance Anchor
-- **Optimal Decision Boundary (Hamming Threshold):** $\le 49$ bits (dynamically F1-optimized)
-- **Precision:** **66.56%**
-- **Recall:** **84.65%**
-- **F1-Score:** **74.52%**
-- **Hamming Distance Distribution:**
-  - Query vs Target Class (Pits): Mean **131.22 bits** ($\sigma$: **76.84 bits**)
-  - Query vs Background Class (Mondgelände): Mean **197.32 bits** ($\sigma$: **75.01 bits**)
-
-#### Confusion Matrix
-
-| | Predicted Positive | Predicted Negative |
-|---|---|---|
-| **Actual Positive** | TP: 140,118 | FN: 25,410 |
-| **Actual Negative** | FP: 70,390 | TN: 764,082 |
-
 <!-- BENCHMARK_METRICS_START -->
-#### Search Execution Performance (Host-Native macOS)
-- **Scan Latency:** **227.72 ms** mean latency for 100,000 records (278 queries)
-- **Throughput:** **122.08 MVPS** (using lock-free multi-family resonant voting, peak memory: **1,059.8 MB**)
-
-### 2. High-Performance Native Performance vs. Baselines & Virtualization
-
-Bypassing Docker Desktop's virtualization layer and running natively on the macOS host avoids hypervisor scheduling overheads and OS context switching on `BlockingWaitStrategy` locks. Pithos's binarized projection and 3-Gate early-exit cascade yield large speedups over exact float scan baselines on the same 100,000 replicated lunar vector database:
-
-| Backend | Throughput |
-|---|---|
-| Sequential JIT Compiled Baseline (float L2) | 3.71 MVPS |
-| FAISS Flat L2 (CPU Native) | 94.41 MVPS |
-| **Pithos -- Host-Native macOS** | **122.08 MVPS** (Peak Memory: **1,059.8 MB**) |
-
-Host-native Pithos achieves a **~32.9x speedup** over the JIT baseline and a **~1.3x speedup** over native FAISS Flat L2.
-
-### 3. Dimensionality Crossover Analysis (Pithos vs FAISS Flat L2)
-
-Measured on 100,000 records with K=100. Single-query measures raw FFI point-lookup latency; multi-query (N=100) measures batched SIMD throughput.
-
-| D | Single-Query Latency (Pithos) | Single-Query Latency (FAISS) | Multi-Query MVPS (Pithos) | Multi-Query MVPS (FAISS) | Speedup |
-|---:|---:|---:|---:|---:|---:|
-| 16 | 1,408.0 us | 237.0 us | 205.01 | 2,710.92 | -13.2x |
-| 32 | 1,503.6 us | 295.0 us | 201.62 | 1,565.13 | -7.8x |
-| 64 | 1,273.0 us | 484.2 us | 195.72 | 848.84 | -4.3x |
-| 128 | 1,492.8 us | 1,006.3 us | 168.04 | 410.80 | -2.4x |
-| 256 | 1,753.9 us | 1,982.0 us | 138.33 | 170.02 | -1.2x |
-| 384 | 2,069.8 us | 3,105.6 us | 117.60 | 103.27 | 1.1x |
-| 512 | 2,141.9 us | 3,976.1 us | 107.37 | 77.22 | 1.4x |
-| 768 | 2,592.8 us | 5,845.1 us | 87.94 | 42.55 | 2.1x |
-| 1024 | 2,782.3 us | 7,525.0 us | 79.33 | 32.27 | 2.5x |
-
-**Single-Query Crossover:** D=128 -> D=256 (faiss -> pithos)
-**Multi-Query Crossover:** D=256 -> D=384 (faiss -> pithos)
-
-### 6. SIFT10K Generalization Benchmark
-
-To verify Pithos's generalization, we benchmark on the standard **SIFT10K** dataset (10,000 base vectors, 100 query vectors, 128 dimensions):
-
-| Metric | FAISS Flat L2 | Pithos Native | Speedup |
-|---|---:|---:|---:|
-| Recall@1 | 100.00% | 97.00% | - |
-| Recall@10 | 100.00% | 93.00% | - |
-| Recall@100 | 100.00% | 72.23% | - |
-| Query Latency (ms) | 3.23 ms | 37.08 ms | 0.09x |
-
-For extremely small databases like SIFT10K (N=10,000), FAISS Flat L2 runs with minimal CPU cache footprint. Pithos's 1-bit Matryoshka recall follows the theoretical error bounds for 128 dimensions.
-
-### 7. FFI Boundary Analysis
-
-We measure the exact roundtrip latency of crossing the Python-to-C boundary (via ctypes) into the GraalVM isolate thread:
-
-- **Total iterations:** 100,000 calls
-- **Average FFI roundtrip latency:** **0.1878 µs**
-- **Pure Python no-op call overhead:** **0.0370 µs**
-- **Net FFI boundary crossing overhead:** **0.1508 µs**
-
-This FFI crossing overhead of < 0.2 microseconds is tiny, explaining why Pithos matches/beats native C++ FAISS even for low-dimensional single-query lookups.
-
 ### Visual Charts (Vector Anomaly Distribution & Throughput Analysis)
 
 #### Hamming Distance Distribution
@@ -413,7 +344,7 @@ Dynamically compiles a scale dataset of $500{,}000$ float records, maps them off
 ```bash
 export JAVA_HOME=/Users/finnhertsch/projects/lcvk/graalvm/Contents/Home
 export PATH=$JAVA_HOME/bin:$PATH
-.venv/bin/python run_real_verification.py
+.venv/bin/python benchmarks/run_real_verification.py
 ```
 
 Runs the full Lunar Pit / DINOv3 + Lunar LoRA pipeline, ingests raw float vectors, optimizes Hamming classification thresholds, and validates Pithos precision and F1-score.
@@ -421,7 +352,16 @@ Runs the full Lunar Pit / DINOv3 + Lunar LoRA pipeline, ingests raw float vector
 ### 4. Running Baseline Benchmarks
 
 ```bash
-.venv/bin/python benchmark_baselines.py
+.venv/bin/python benchmarks/benchmark_baselines.py
 ```
 
 Runs both the FAISS Flat Index L2 baseline and a simulated single-threaded JIT sequential scan over the actual 1,000,000 replicated lunar vector database, saving baseline results to `baselines_metrics.json`.
+
+---
+
+## Future Roadmap (Next Steps)
+
+### Write-Ahead-Log (WAL) for the LSM Delta-Buffer
+- **Objective**: Improve crash-resilience for real-time inserts.
+- **Concept**: Prior to appending incoming vectors into the volatile in-memory delta-buffer (via `vdb_insert`), each insert/delete transaction will be sequentially appended to a lightweight, unbuffered disk log (WAL).
+- **Crash Recovery**: During isolate initialization (`vdb_init`), Pithos will scan for any existing WAL files, replay outstanding transactions to reconstruct the delta-buffer, and truncate the WAL once a successful background flush to the immutable base index completes.

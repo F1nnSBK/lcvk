@@ -1,187 +1,11 @@
 import os
 import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import time
 import json
-import ctypes
-import contextlib
 import numpy as np
 import faiss
-
-@contextlib.contextmanager
-def suppress_stderr():
-    sys.stderr.flush()
-    err_fd = sys.stderr.fileno()
-    saved = os.dup(err_fd)
-    null_fd = os.open(os.devnull, os.O_RDWR)
-    os.dup2(null_fd, err_fd)
-    os.close(null_fd)
-    try:
-        yield
-    finally:
-        os.dup2(saved, err_fd)
-        os.close(saved)
-
-class GraalIsolate(ctypes.Structure):
-    pass
-
-class GraalIsolateThread(ctypes.Structure):
-    pass
-
-class PithosEngineAblation:
-    def __init__(self, lib_path: str):
-        self.lib = ctypes.CDLL(lib_path)
-        self.isolate = ctypes.POINTER(GraalIsolate)()
-        self.thread = ctypes.POINTER(GraalIsolateThread)()
-
-        self.lib.graal_create_isolate.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.POINTER(GraalIsolate)),
-            ctypes.POINTER(ctypes.POINTER(GraalIsolateThread)),
-        ]
-        self.lib.graal_create_isolate.restype = ctypes.c_int
-        self.lib.vdb_init.argtypes = [ctypes.c_void_p]
-        self.lib.vdb_init.restype = ctypes.c_int
-        self.lib.vdb_load_index.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
-        self.lib.vdb_load_index.restype = ctypes.c_int
-        self.lib.vdb_load_index_with_weights.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int,
-        ]
-        self.lib.vdb_load_index_with_weights.restype = ctypes.c_int
-        self.lib.vdb_batch_search.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p,
-            ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
-        ]
-        self.lib.vdb_batch_search.restype = ctypes.c_int
-        
-        self.lib.vdb_compile_index_file_v2.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_byte, ctypes.c_longlong,
-            ctypes.c_int, ctypes.c_void_p, ctypes.c_int,
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
-        ]
-        self.lib.vdb_compile_index_file_v2.restype = ctypes.c_int
-        
-        self.lib.vdb_close.argtypes = [ctypes.c_void_p]
-        self.lib.vdb_close.restype = ctypes.c_int
-
-        # LSM delta buffer API
-        self.lib.vdb_create_delta_buffer.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
-        self.lib.vdb_create_delta_buffer.restype = ctypes.c_int
-        
-        self.lib.vdb_insert.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_longlong, ctypes.c_void_p]
-        self.lib.vdb_insert.restype = ctypes.c_int
-        
-        self.lib.vdb_delete_from_delta.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_longlong]
-        self.lib.vdb_delete_from_delta.restype = ctypes.c_int
-        
-        self.lib.vdb_delta_size.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-        self.lib.vdb_delta_size.restype = ctypes.c_longlong
-        
-        self.lib.vdb_needs_flush.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-        self.lib.vdb_needs_flush.restype = ctypes.c_int
-        
-        self.lib.vdb_search_merged.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p
-        ]
-        self.lib.vdb_search_merged.restype = ctypes.c_int
-        
-        self.lib.vdb_backup_delta.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
-        self.lib.vdb_backup_delta.restype = ctypes.c_int
-        
-        self.lib.vdb_restore_delta.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
-        self.lib.vdb_restore_delta.restype = ctypes.c_int
-
-        with suppress_stderr():
-            status = self.lib.graal_create_isolate(
-                None, ctypes.byref(self.isolate), ctypes.byref(self.thread)
-            )
-        if status != 0:
-            raise RuntimeError("Failed to create GraalVM isolate.")
-        with suppress_stderr():
-            status = self.lib.vdb_init(self.thread)
-        if status != 0:
-            raise RuntimeError("Failed to initialize Pithos engine.")
-
-    def compile_index_file_v2(self, path, planet_id, radius, dim, tiers, ids, vectors, qmode):
-        with suppress_stderr():
-            return self.lib.vdb_compile_index_file_v2(
-                self.thread, path.encode(), planet_id, radius, dim,
-                tiers.ctypes.data_as(ctypes.c_void_p), len(tiers),
-                ids.ctypes.data_as(ctypes.c_void_p),
-                vectors.ctypes.data_as(ctypes.c_void_p), len(ids), qmode
-            )
-
-    def load_index(self, name, path, weights=None, lora_dim=0):
-        if weights is not None:
-            with suppress_stderr():
-                return self.lib.vdb_load_index_with_weights(
-                    self.thread, name.encode(), path.encode(),
-                    weights.ctypes.data_as(ctypes.c_void_p), lora_dim,
-                )
-        with suppress_stderr():
-            return self.lib.vdb_load_index(self.thread, name.encode(), path.encode())
-
-    def batch_search(self, name, queries, k):
-        n = queries.shape[0]
-        out_ids = np.zeros(n * k, dtype=np.int64)
-        out_dists = np.zeros(n * k, dtype=np.int32)
-        with suppress_stderr():
-            status = self.lib.vdb_batch_search(
-                self.thread, name.encode(),
-                queries.ctypes.data_as(ctypes.c_void_p), n, k,
-                out_ids.ctypes.data_as(ctypes.c_void_p),
-                out_dists.ctypes.data_as(ctypes.c_void_p),
-            )
-        if status != 0:
-            raise RuntimeError(f"batch_search failed: {status}")
-        return out_ids.reshape(n, k), out_dists.reshape(n, k)
-
-    # LSM methods
-    def create_delta_buffer(self, name, threshold):
-        return self.lib.vdb_create_delta_buffer(self.thread, name.encode(), threshold)
-        
-    def insert(self, name, record_id, vector):
-        return self.lib.vdb_insert(self.thread, name.encode(), record_id, vector.ctypes.data_as(ctypes.c_void_p))
-        
-    def delete_from_delta(self, name, record_id):
-        return self.lib.vdb_delete_from_delta(self.thread, name.encode(), record_id)
-        
-    def delta_size(self, name):
-        return self.lib.vdb_delta_size(self.thread, name.encode())
-        
-    def needs_flush(self, name):
-        return self.lib.vdb_needs_flush(self.thread, name.encode())
-        
-    def search_merged(self, name, query, k):
-        out_ids = np.zeros(k, dtype=np.int64)
-        out_dists = np.zeros(k, dtype=np.int32)
-        status = self.lib.vdb_search_merged(
-            self.thread, name.encode(),
-            query.ctypes.data_as(ctypes.c_void_p), k,
-            out_ids.ctypes.data_as(ctypes.c_void_p),
-            out_dists.ctypes.data_as(ctypes.c_void_p)
-        )
-        if status != 0:
-            raise RuntimeError(f"search_merged failed: {status}")
-        return out_ids, out_dists
-        
-    def backup_delta(self, name, path):
-        return self.lib.vdb_backup_delta(self.thread, name.encode(), path.encode())
-        
-    def restore_delta(self, name, path, threshold):
-        return self.lib.vdb_restore_delta(self.thread, name.encode(), path.encode(), threshold)
-
-    def close(self):
-        if self.thread:
-            self.lib.vdb_close(self.thread)
-            self.thread = None
-
-def get_lib_path():
-    import platform
-    ext = "dylib" if platform.system() == "Darwin" else "so"
-    for p in [f"./target/libpithos.{ext}", f"./build-output/libpithos.{ext}", f"./libpithos.{ext}"]:
-        if os.path.exists(p):
-            return p
-    raise FileNotFoundError("Pithos native library not found.")
+from benchmark import PithosMIDB
 
 def cleanup_index(db_file):
     for ext in ["", "_ids.bin", "_metadata.bin", "_fp16.bin"]:
@@ -198,8 +22,7 @@ def cleanup_index(db_file):
             break
 
 def main():
-    lib_path = get_lib_path()
-    engine = PithosEngineAblation(lib_path)
+    engine = PithosMIDB()
 
     # Load data (10k unique real embeddings, 278 queries)
     db_vectors = np.load("temp/benchmark_data/db_vectors_subset.npy") # shape (10000, 384)
@@ -226,7 +49,7 @@ def main():
     ids_32 = np.arange(len(db_vectors_32), dtype=np.int64)
     
     # Compile and load (QMode 0 = 1-Bit)
-    engine.compile_index_file_v2(db_file_32, 1, 1737400, 32, tiers_32, ids_32, db_vectors_32, 0)
+    engine.compile_index_file(db_file_32, 1, 1737400, 32, tiers_32, ids_32, db_vectors_32, 0)
     
     # orthogonal weights for D=32
     q_mat_32, _ = np.linalg.qr(np.random.normal(size=(32, 32)))
@@ -261,7 +84,7 @@ def main():
     tiers_33 = np.array([16, 33], dtype=np.int32)
     ids_33 = np.arange(len(db_vectors_33), dtype=np.int64)
     
-    engine.compile_index_file_v2(db_file_33, 1, 1737400, 33, tiers_33, ids_33, db_vectors_33, 0)
+    engine.compile_index_file(db_file_33, 1, 1737400, 33, tiers_33, ids_33, db_vectors_33, 0)
     
     q_mat_33, _ = np.linalg.qr(np.random.normal(size=(33, 33)))
     weights_33 = q_mat_33.astype(np.float32)
@@ -289,7 +112,7 @@ def main():
     # 2A. QMode 1 (2-Bit) D=32
     db_file_32_q1 = "temp/ablation_d32_q1"
     cleanup_index(db_file_32_q1)
-    engine.compile_index_file_v2(db_file_32, 1, 1737400, 32, tiers_32, ids_32, db_vectors_32, 1) # QMode=1
+    engine.compile_index_file(db_file_32, 1, 1737400, 32, tiers_32, ids_32, db_vectors_32, 1) # QMode=1
     
     engine.load_index("idx_32_q1", db_file_32, weights_32, 32)
     engine.batch_search("idx_32_q1", queries_32[:5], 10)
@@ -304,7 +127,7 @@ def main():
     
     # 2B. QMode 2 (Float32 Bypass) D=32
     cleanup_index(db_file_32)
-    engine.compile_index_file_v2(db_file_32, 1, 1737400, 32, tiers_32, ids_32, db_vectors_32, 2) # QMode=2
+    engine.compile_index_file(db_file_32, 1, 1737400, 32, tiers_32, ids_32, db_vectors_32, 2) # QMode=2
     
     engine.load_index("idx_32_q2", db_file_32, weights_32, 32)
     engine.batch_search("idx_32_q2", queries_32[:5], 10)
@@ -319,7 +142,7 @@ def main():
     
     # Size for QMode 0
     cleanup_index(db_file_32)
-    engine.compile_index_file_v2(db_file_32, 1, 1737400, 32, tiers_32, ids_32, db_vectors_32, 0)
+    engine.compile_index_file(db_file_32, 1, 1737400, 32, tiers_32, ids_32, db_vectors_32, 0)
     size_q0 = sum(os.path.getsize(db_file_32 + ext) for ext in ["", "_ids.bin", "_metadata.bin", "_tier_0.bin", "_tier_1.bin"] if os.path.exists(db_file_32 + ext))
 
     print(f"QMode 0 (1-Bit):   Recall@10 = {recall_32:.4f}, Dateigröße = {size_q0/1024:.2f} KB")
@@ -337,7 +160,7 @@ def main():
     ids_384 = np.arange(len(db_vectors), dtype=np.int64)
     
     # Compile index (automatically creates _fp16.bin sidecar)
-    engine.compile_index_file_v2(db_file_384, 1, 1737400, 384, tiers_384, ids_384, db_vectors, 0)
+    engine.compile_index_file(db_file_384, 1, 1737400, 384, tiers_384, ids_384, db_vectors, 0)
     
     # FAISS ground truth for D=384
     faiss_384 = faiss.IndexFlatL2(384)

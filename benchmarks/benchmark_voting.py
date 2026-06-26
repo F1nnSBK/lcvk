@@ -20,123 +20,9 @@ import numpy as np
 import faiss
 
 
-@contextlib.contextmanager
-def suppress_stderr():
-    sys.stderr.flush()
-    err_fd = sys.stderr.fileno()
-    saved = os.dup(err_fd)
-    null_fd = os.open(os.devnull, os.O_RDWR)
-    os.dup2(null_fd, err_fd)
-    os.close(null_fd)
-    try:
-        yield
-    finally:
-        os.dup2(saved, err_fd)
-        os.close(saved)
-
-
-# ---------------------------------------------------------------------------
-# PithosEngine (voting-capable subset)
-# ---------------------------------------------------------------------------
-
-class GraalIsolate(ctypes.Structure):
-    pass
-
-class GraalIsolateThread(ctypes.Structure):
-    pass
-
-class PithosEngine:
-    def __init__(self, lib_path: str):
-        self.lib = ctypes.CDLL(lib_path)
-        self.isolate = ctypes.POINTER(GraalIsolate)()
-        self.thread = ctypes.POINTER(GraalIsolateThread)()
-
-        self.lib.graal_create_isolate.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.POINTER(GraalIsolate)),
-            ctypes.POINTER(ctypes.POINTER(GraalIsolateThread)),
-        ]
-        self.lib.graal_create_isolate.restype = ctypes.c_int
-        self.lib.vdb_init.argtypes = [ctypes.c_void_p]
-        self.lib.vdb_init.restype = ctypes.c_int
-        self.lib.vdb_load_index.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
-        self.lib.vdb_load_index.restype = ctypes.c_int
-        self.lib.vdb_load_index_with_weights.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int,
-        ]
-        self.lib.vdb_load_index_with_weights.restype = ctypes.c_int
-        self.lib.vdb_compile_index_file.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_byte, ctypes.c_longlong,
-            ctypes.c_int, ctypes.c_void_p, ctypes.c_int,
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
-        ]
-        self.lib.vdb_compile_index_file.restype = ctypes.c_int
-        self.lib.vdb_query_planetary_grid.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p,
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p,
-        ]
-        self.lib.vdb_query_planetary_grid.restype = ctypes.c_longlong
-        self.lib.vdb_close.argtypes = [ctypes.c_void_p]
-        self.lib.vdb_close.restype = ctypes.c_int
-
-        with suppress_stderr():
-            status = self.lib.graal_create_isolate(
-                None, ctypes.byref(self.isolate), ctypes.byref(self.thread)
-            )
-        if status != 0:
-            raise RuntimeError("Failed to create GraalVM isolate.")
-        with suppress_stderr():
-            status = self.lib.vdb_init(self.thread)
-        if status != 0:
-            raise RuntimeError("Failed to initialize Pithos engine.")
-
-    def compile_index_file(self, path, planet_id, radius, dim, tiers, ids, vectors):
-        with suppress_stderr():
-            return self.lib.vdb_compile_index_file(
-                self.thread, path.encode(), planet_id, radius, dim,
-                tiers.ctypes.data_as(ctypes.c_void_p), len(tiers),
-                ids.ctypes.data_as(ctypes.c_void_p),
-                vectors.ctypes.data_as(ctypes.c_void_p), len(ids),
-            )
-
-    def load_index(self, name, path, weights=None, lora_dim=0):
-        if weights is not None:
-            with suppress_stderr():
-                return self.lib.vdb_load_index_with_weights(
-                    self.thread, name.encode(), path.encode(),
-                    weights.ctypes.data_as(ctypes.c_void_p), lora_dim,
-                )
-        with suppress_stderr():
-            return self.lib.vdb_load_index(self.thread, name.encode(), path.encode())
-
-    def query_planetary_grid(self, name, queries, families, thresholds, voting_mask):
-        with suppress_stderr():
-            return self.lib.vdb_query_planetary_grid(
-                self.thread, name.encode(),
-                queries.ctypes.data_as(ctypes.c_void_p),
-                families.ctypes.data_as(ctypes.c_void_p),
-                thresholds.ctypes.data_as(ctypes.c_void_p),
-                queries.shape[0],
-                voting_mask.ctypes.data_as(ctypes.c_void_p),
-            )
-
-    def close(self):
-        if self.thread:
-            self.lib.vdb_close(self.thread)
-            self.thread = None
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def get_lib_path():
-    import platform
-    ext = "dylib" if platform.system() == "Darwin" else "so"
-    for p in [f"./target/libpithos.{ext}", f"./build-output/libpithos.{ext}", f"./libpithos.{ext}"]:
-        if os.path.exists(p):
-            return p
-    raise FileNotFoundError("Pithos native library not found.")
+# PYTHONPATH fallback and PithosMIDB Import
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from benchmark import PithosMIDB
 
 
 def cleanup_index(db_file):
@@ -267,8 +153,7 @@ def main():
     # ------------------------------------------------------------------
     print("Running Pithos Native Resonant Voting...", end=" ", flush=True)
 
-    lib_path = get_lib_path()
-    engine = PithosEngine(lib_path)
+    engine = PithosMIDB()
 
     ids = np.arange(num_records, dtype=np.int64)
     status = engine.compile_index_file(DB_FILE, 1, 1737400, DIMENSION, TIERS, ids, db_vectors)
@@ -368,5 +253,6 @@ def main():
 
 if __name__ == "__main__":
     main_dir = os.path.dirname(os.path.realpath(__file__))
-    os.chdir(main_dir)
+    project_root = os.path.abspath(os.path.join(main_dir, ".."))
+    os.chdir(project_root)
     main()

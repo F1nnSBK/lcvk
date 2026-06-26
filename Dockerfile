@@ -69,12 +69,6 @@ COPY --from=builder /build/target/libpithos.so ./libpithos.so
 COPY --from=builder /build/target/pithos.h .
 COPY --from=builder /build/target/graal_isolate.h .
 COPY test_client.c .
-COPY benchmark.py .
-COPY ingest_pipeline.py .
-COPY query_generator.py .
-COPY run_real_verification.py .
-COPY generate_graphics.py .
-COPY pithos_metrics.json .
 
 # Compile test client, linking it to our newly built libpithos.so
 RUN gcc -o test_client test_client.c -I. -L. -lpithos -Wl,-rpath,.

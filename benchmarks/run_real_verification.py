@@ -1,9 +1,10 @@
 import os
 import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import time
 import argparse
 import numpy as np
-from benchmark import PithosEngine
+from benchmark import PithosMIDB
 
 DB_FILE = "temp/benchmark_data/lunar_real_data"
 DIMENSION = 384
@@ -211,34 +212,8 @@ def main():
     # 2. Run the actual native verification with the suggested threshold
     print(f"\nRe-running native verification with threshold = {best_threshold}...")
     
-    import platform
-    if platform.system() == "Darwin":
-        so_paths = [
-            "./target/libpithos.dylib",
-            "./build-output/libpithos.dylib",
-            "./libpithos.dylib",
-            "./target/libpithos.so",
-            "./build-output/libpithos.so",
-        ]
-    else:
-        so_paths = [
-            "./build-output/libpithos.so",
-            "./libpithos.so",
-            "./target/libpithos.so",
-        ]
-    
-    lib_path = None
-    for p in so_paths:
-        if os.path.exists(p):
-            lib_path = p
-            break
-            
-    if not lib_path:
-        print("[Error] Pithos native library not found.")
-        sys.exit(1)
-        
     t_engine_start = time.perf_counter()
-    engine = PithosEngine(lib_path)
+    engine = PithosMIDB()
     
     # Load index supplying the weights matrix for SVD energy calculation
     status = engine.load_index("lunar_real", DB_FILE, weights, DIMENSION)

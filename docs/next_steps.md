@@ -30,8 +30,8 @@ typedef enum {
     QMODE_FLOAT_HYBRID = 2
 } QuantizationMode;
 
-// Neue API zur Index-Kompilierung mit flexibler Quantisierung
-int vdb_compile_index_file_v2(
+// API zur Index-Kompilierung mit flexibler Quantisierung
+int vdb_compile_index_file(
     graal_isolatethead_t* thread, 
     char* path, 
     byte planetId, 

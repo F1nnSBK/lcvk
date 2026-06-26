@@ -2,41 +2,18 @@ import time
 import os
 import ctypes
 import json
-import numpy as np
+import sys
 
-# Load native library
-lib_path = "./libpithos.dylib"
-if not os.path.exists(lib_path):
-    # Try current directory first, then target/
-    lib_path = "target/libpithos.dylib"
+# PYTHONPATH fallback and PithosMIDB Import
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from benchmark import PithosMIDB
 
-print(f"=== Pithos FFI Boundary Analysis ===")
-print(f"Loading native library from: {lib_path}")
+print("=== Pithos FFI Boundary Analysis ===")
 
-lib = ctypes.CDLL(lib_path)
-
-class GraalIsolate(ctypes.Structure):
-    pass
-
-class GraalIsolateThread(ctypes.Structure):
-    pass
-
-lib.graal_create_isolate.argtypes = [
-    ctypes.c_void_p, 
-    ctypes.POINTER(ctypes.POINTER(GraalIsolate)), 
-    ctypes.POINTER(ctypes.POINTER(GraalIsolateThread))
-]
-lib.graal_create_isolate.restype = ctypes.c_int
-
-lib.vdb_size.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-lib.vdb_size.restype = ctypes.c_longlong
-
-isolate = ctypes.POINTER(GraalIsolate)()
-thread = ctypes.POINTER(GraalIsolateThread)()
-
-status = lib.graal_create_isolate(None, ctypes.byref(isolate), ctypes.byref(thread))
-if status != 0:
-    raise RuntimeError("Failed to create GraalVM isolate")
+# Retrieve centralized singleton instance (loads lib and initializes isolate thread)
+db = PithosMIDB()
+lib = db.lib
+thread = db.thread
 
 # 1. Warmup
 print("Warming up FFI bridge...")
@@ -78,6 +55,8 @@ metrics = {
     "net_ffi_overhead_us": max(0.0, avg_time_us - py_time_us)
 }
 
-with open("ffi_metrics.json", "w") as f:
+os.makedirs("temp/benchmark_data", exist_ok=True)
+metrics_path = "temp/benchmark_data/ffi_metrics.json"
+with open(metrics_path, "w") as f:
     json.dump(metrics, f, indent=4)
-print("FFI metrics saved to ffi_metrics.json")
+print(f"FFI metrics saved to {metrics_path}")

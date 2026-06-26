@@ -1,5 +1,6 @@
 import os
 import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import struct
 import numpy as np
 
@@ -12,7 +13,7 @@ try:
 except ImportError:
     HAS_TORCH = False
 
-from benchmark import PithosEngine
+from benchmark import PithosMIDB
 
 # Configuration
 NUM_RECORDS = 1_000_000
@@ -176,31 +177,7 @@ def main():
     db_labels = labels[source_indices]
     
     # Resolve native library path
-    import platform
-    if platform.system() == "Darwin":
-        so_paths = [
-            "./target/libpithos.dylib",
-            "./build-output/libpithos.dylib",
-            "./libpithos.dylib",
-            "./target/libpithos.so",
-            "./build-output/libpithos.so",
-        ]
-    else:
-        so_paths = [
-            "./build-output/libpithos.so",
-            "./libpithos.so",
-            "./target/libpithos.so",
-        ]
-    lib_path = None
-    for p in so_paths:
-        if os.path.exists(p):
-            lib_path = p
-            break
-    if not lib_path:
-        print("[Error] Pithos native library not found.", file=sys.stderr)
-        sys.exit(1)
-        
-    engine = PithosEngine(lib_path)
+    engine = PithosMIDB()
     
     # Compile raw float vectors into Pithos database files
     print(f"Compiling Pithos multi-tier database files for {NUM_RECORDS:,} records...")

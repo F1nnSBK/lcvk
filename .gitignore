@@ -45,3 +45,9 @@ build-output/
 # Temporary benchmark metrics
 lcvk_metrics.json
 temp/
+
+# Datasets and download caches
+siftsmall/
+siftsmall.tgz
+siftsmall_*.fvecs
+siftsmall_groundtruth.ivecs

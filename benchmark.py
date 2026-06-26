@@ -42,7 +42,7 @@ def generate_hypersphere_vectors(num_vectors, dim=384):
 # Configuration parameters for scale benchmark
 NUM_RECORDS = 100_000
 DIMENSION = 384
-DB_FILE = "pithos_scale_test"
+DB_FILE = "temp/pithos_scale_test"
 TIERS = np.array([64, 128, 256, 384], dtype=np.int32)
 
 # Fixed reproducible target vector for semantic search verification
@@ -80,13 +80,79 @@ class GraalIsolate(ctypes.Structure):
 class GraalIsolateThread(ctypes.Structure):
     pass
 
-class PithosEngine:
-    """Python OOP wrapper for the AOT-compiled Pithos native library."""
+class PithosMIDB:
+    """
+    AOT-compiled Pithos Model-Isomorphic Database (MIDB) native library interface.
     
-    def __init__(self, lib_path: str):
-        if not os.path.exists(lib_path):
-            raise FileNotFoundError(f"Native shared library not found at: {lib_path}")
+    This class is implemented as a Singleton to guarantee thread-safe initialization,
+    automatic host-native library detection, and process-wide sharing of the 
+    underlying GraalVM Native Image isolate context and C-FFI resources.
+    
+    Attributes:
+        lib (ctypes.CDLL): The loaded native shared library instance.
+        isolate (POINTER(GraalIsolate)): Pointer to the native GraalVM execution isolate.
+        thread (POINTER(GraalIsolateThread)): Pointer to the active isolate thread context.
+    """
+    _instance = None
+
+    def __new__(cls, lib_path=None):
+        """
+        Retrieves or instantiates the PithosMIDB singleton.
+        
+        If no instance exists, it searches candidate paths relative to this module
+        and the current working directory to locate the platform-specific native shared
+        library, then kicks off the GraalVM JVM isolate context.
+        
+        Args:
+            lib_path (str, optional): Explicit absolute path to the native library file.
+                                      If None, performs platform-aware auto-discovery.
+                                      
+        Returns:
+            PithosMIDB: The shared singleton instance.
+        """
+        if cls._instance is None:
+            instance = super(PithosMIDB, cls).__new__(cls)
+            if lib_path is None:
+                import platform
+                system = platform.system()
+                exts = ["dylib", "so"] if system == "Darwin" else ["so", "dylib"]
+                if system == "Windows":
+                    exts.insert(0, "dll")
+
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                dirs = ["target", "build-output", "."]
+                
+                for ext in exts:
+                    for d in dirs:
+                        candidate_rel = os.path.abspath(os.path.join(base_dir, d, f"libpithos.{ext}"))
+                        if os.path.exists(candidate_rel):
+                            lib_path = candidate_rel
+                            break
+                        candidate_literal = os.path.abspath(os.path.join(d, f"libpithos.{ext}"))
+                        if os.path.exists(candidate_literal):
+                            lib_path = candidate_literal
+                            break
+                    if lib_path:
+                        break
+
+                if not lib_path:
+                    raise FileNotFoundError("Pithos native shared library not found in target/ or build-output/")
             
+            instance._init_ffi(lib_path)
+            cls._instance = instance
+        return cls._instance
+
+    def __init__(self, lib_path=None):
+        """No-op initialization to prevent re-initializing the singleton state."""
+        pass
+
+    def _init_ffi(self, lib_path: str):
+        """
+        Loads the native shared library and registers all exposed C-API signatures.
+        
+        Args:
+            lib_path (str): Path to the compiled .so, .dylib, or .dll library.
+        """
         self.lib = ctypes.CDLL(lib_path)
         self.isolate = ctypes.POINTER(GraalIsolate)()
         self.thread = ctypes.POINTER(GraalIsolateThread)()
@@ -131,7 +197,7 @@ class PithosEngine:
         self.lib.vdb_compile_index_file.argtypes = [
             ctypes.c_void_p, ctypes.c_char_p, ctypes.c_byte, ctypes.c_longlong,
             ctypes.c_int, ctypes.c_void_p, ctypes.c_int,
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int
         ]
         self.lib.vdb_compile_index_file.restype = ctypes.c_int
 
@@ -151,6 +217,34 @@ class PithosEngine:
         self.lib.vdb_close.argtypes = [ctypes.c_void_p]
         self.lib.vdb_close.restype = ctypes.c_int
 
+        # LSM delta buffer API
+        self.lib.vdb_create_delta_buffer.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        self.lib.vdb_create_delta_buffer.restype = ctypes.c_int
+
+        self.lib.vdb_insert.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_longlong, ctypes.c_void_p]
+        self.lib.vdb_insert.restype = ctypes.c_int
+
+        self.lib.vdb_delete_from_delta.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_longlong]
+        self.lib.vdb_delete_from_delta.restype = ctypes.c_int
+
+        self.lib.vdb_delta_size.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        self.lib.vdb_delta_size.restype = ctypes.c_longlong
+
+        self.lib.vdb_needs_flush.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        self.lib.vdb_needs_flush.restype = ctypes.c_int
+
+        self.lib.vdb_search_merged.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int,
+            ctypes.c_void_p, ctypes.c_void_p
+        ]
+        self.lib.vdb_search_merged.restype = ctypes.c_int
+
+        self.lib.vdb_backup_delta.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+        self.lib.vdb_backup_delta.restype = ctypes.c_int
+
+        self.lib.vdb_restore_delta.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+        self.lib.vdb_restore_delta.restype = ctypes.c_int
+
         # Instantiate isolate thread context with suppressed stderr for clean output
         with suppress_stderr():
             status = self.lib.graal_create_isolate(None, ctypes.byref(self.isolate), ctypes.byref(self.thread))
@@ -163,15 +257,49 @@ class PithosEngine:
         if status != 0:
             raise RuntimeError("Failed to initialize Pithos DB engine.")
 
-    def compile_index_file(self, file_path: str, planet_id: int, planet_radius: int, dimension: int, tiers: np.ndarray, ids: np.ndarray, vectors: np.ndarray) -> int:
+    def compile_index_file(self, file_path: str, planet_id: int, planet_radius: int, dimension: int, tiers: np.ndarray, ids: np.ndarray, vectors: np.ndarray, q_mode: int = 0) -> int:
+        """
+        Compiles raw floating-point vectors into a multi-tier database file structure.
+        
+        Args:
+            file_path (str): Output base path for compiled index files.
+            planet_id (int): Category metadata identifier for the dataset.
+            planet_radius (int): Planetary grid radius metadata parameter.
+            dimension (int): Length of each raw input vector.
+            tiers (np.ndarray): 1D array of integers specifying Matryoshka cascading boundaries.
+            ids (np.ndarray): 1D array of 64-bit record identifiers.
+            vectors (np.ndarray): Raw float32 database vectors.
+            q_mode (int, optional): Quantization Mode:
+                                    0 = 1-bit sign-only (Default)
+                                    1 = 2-bit ternary (active mask + signs)
+                                    2 = float32 raw bypass (no quantization, CPU-SIMD scan)
+                                    
+        Returns:
+            int: 0 on success, non-zero error code on failure.
+        """
         path_bytes = file_path.encode("utf-8")
         tiers_ptr = tiers.ctypes.data_as(ctypes.c_void_p)
         ids_ptr = ids.ctypes.data_as(ctypes.c_void_p)
         vectors_ptr = vectors.ctypes.data_as(ctypes.c_void_p)
         with suppress_stderr():
-            return self.lib.vdb_compile_index_file(self.thread, path_bytes, planet_id, planet_radius, dimension, tiers_ptr, len(tiers), ids_ptr, vectors_ptr, len(ids))
+            return self.lib.vdb_compile_index_file(self.thread, path_bytes, planet_id, planet_radius, dimension, tiers_ptr, len(tiers), ids_ptr, vectors_ptr, len(ids), q_mode)
 
     def load_index(self, index_name: str, file_path: str, weights: np.ndarray = None, lora_dim: int = 0) -> int:
+        """
+        Loads a compiled index off-heap using POSIX memory-mapping (mmap).
+        
+        Optionally configures an orthogonal weights projection matrix to enable
+        integrated model-isomorphic query transformation at search time.
+        
+        Args:
+            index_name (str): Identifier tag to assign to this index.
+            file_path (str): Base file path of the index to load.
+            weights (np.ndarray, optional): 2D float32 projection/adapter weight matrix.
+            lora_dim (int, optional): Rank of the weights matrix projection.
+            
+        Returns:
+            int: 0 on success, non-zero error code on failure.
+        """
         name_bytes = index_name.encode("utf-8")
         path_bytes = file_path.encode("utf-8")
         if weights is not None:
@@ -183,6 +311,15 @@ class PithosEngine:
                 return self.lib.vdb_load_index(self.thread, name_bytes, path_bytes)
 
     def get_info(self, index_name: str) -> dict:
+        """
+        Queries and returns database-wide layout characteristics and metadata.
+        
+        Args:
+            index_name (str): Registered index tag to query.
+            
+        Returns:
+            dict: Metadata containing 'dimension', 'size', 'planet_id', 'planet_radius', 'tiers_count'.
+        """
         name_bytes = index_name.encode("utf-8")
         dim = ctypes.c_int(0)
         size = ctypes.c_longlong(0)
@@ -206,6 +343,20 @@ class PithosEngine:
         }
 
     def batch_search(self, index_name: str, queries: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Executes a high-performance batch K-Nearest Neighbors search.
+        
+        Leverages early-exit Matryoshka cascading to return exact or approximate neighbors
+        with massive hardware instruction throughput.
+        
+        Args:
+            index_name (str): Registered index tag.
+            queries (np.ndarray): 2D float32 array of query vectors.
+            k (int): Number of nearest neighbors to retrieve.
+            
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: (IDs, distances) both shaped (num_queries, k).
+        """
         num_queries = queries.shape[0]
         out_ids = np.zeros(num_queries * k, dtype=np.int64)
         out_distances = np.zeros(num_queries * k, dtype=np.int32)
@@ -222,9 +373,25 @@ class PithosEngine:
         if status != 0:
             raise RuntimeError(f"Search failed with code: {status}")
             
-        return out_ids, out_distances
+        return out_ids.reshape(num_queries, k), out_distances.reshape(num_queries, k)
 
     def query_planetary_grid(self, index_name: str, queries: np.ndarray, families: np.ndarray, thresholds: np.ndarray, voting_mask: np.ndarray) -> int:
+        """
+        Executes an application-specific Multi-Family Resonant Voting query.
+        
+        Performs simultaneous Hamming-distance criteria evaluations over multiple query vectors.
+        Records meeting the thresholds update a shared bitmask.
+        
+        Args:
+            index_name (str): Registered index tag.
+            queries (np.ndarray): 2D float32 array of queries.
+            families (np.ndarray): 1D array assigning a criteria family ID (0-7) to each query.
+            thresholds (np.ndarray): 1D array of Hamming bit distance cutoff thresholds.
+            voting_mask (np.ndarray): Pre-allocated 1D uint8 array to write matching masks.
+            
+        Returns:
+            int: The total count of matching resonant records.
+        """
         c_index_name = index_name.encode("utf-8")
         query_ptr = queries.ctypes.data_as(ctypes.c_void_p)
         families_ptr = families.ctypes.data_as(ctypes.c_void_p)
@@ -238,21 +405,192 @@ class PithosEngine:
             )
 
     def set_chunk_size(self, index_name: str, chunk_size: int) -> int:
+        """
+        Sets the number of database records grouped into each execution task chunk.
+        
+        Tune this value to align with physical CPU cores, cache layout, or hardware thread concurrency.
+        
+        Args:
+            index_name (str): Target index tag.
+            chunk_size (int): Segment size.
+            
+        Returns:
+            int: 0 on success, non-zero on failure.
+        """
         c_index_name = index_name.encode("utf-8")
         with suppress_stderr():
             return self.lib.vdb_set_chunk_size(self.thread, c_index_name, chunk_size)
 
     def set_energy_budget(self, index_name: str, tau: float) -> int:
+        """
+        Sets the cumulative spectral energy threshold (tau) for early-exit cascade pruning.
+        
+        Args:
+            index_name (str): Target index tag.
+            tau (float): Cutting ratio parameter in (0.0, 1.0].
+            
+        Returns:
+            int: 0 on success, non-zero on failure.
+        """
         c_index_name = index_name.encode("utf-8")
         with suppress_stderr():
             return self.lib.vdb_set_energy_budget(self.thread, c_index_name, ctypes.c_double(tau))
 
     def size(self, index_name: str) -> int:
+        """
+        Returns the number of database records present in the main index.
+        
+        Args:
+            index_name (str): Target index tag.
+            
+        Returns:
+            int: Number of records.
+        """
         c_index = index_name.encode("utf-8")
         with suppress_stderr():
             return self.lib.vdb_size(self.thread, c_index)
 
+    def create_delta_buffer(self, index_name: str, flush_threshold: int) -> int:
+        """
+        Initializes an in-memory LSM delta buffer for real-time appends.
+        
+        Args:
+            index_name (str): The main index tag to associate with the delta buffer.
+            flush_threshold (int): Maximum record capacity of the buffer before requiring a flush.
+            
+        Returns:
+            int: 0 on success, non-zero on failure.
+        """
+        c_name = index_name.encode("utf-8")
+        with suppress_stderr():
+            return self.lib.vdb_create_delta_buffer(self.thread, c_name, flush_threshold)
+
+    def insert(self, index_name: str, vector_id: int, vector: np.ndarray) -> int:
+        """
+        Appends a new database record to the active LSM delta buffer.
+        
+        Args:
+            index_name (str): Target index tag.
+            vector_id (int): 64-bit unique record ID.
+            vector (np.ndarray): 1D float32 vector matching the index dimension.
+            
+        Returns:
+            int: 0 on success, non-zero on failure.
+        """
+        c_name = index_name.encode("utf-8")
+        vec_ptr = vector.ctypes.data_as(ctypes.c_void_p)
+        with suppress_stderr():
+            return self.lib.vdb_insert(self.thread, c_name, vector_id, vec_ptr)
+
+    def delete_from_delta(self, index_name: str, vector_id: int) -> int:
+        """
+        Marks a record ID as deleted inside the volatile delta buffer (writes a tombstone).
+        
+        Args:
+            index_name (str): Target index tag.
+            vector_id (int): 64-bit unique record ID.
+            
+        Returns:
+            int: 0 on success, non-zero on failure.
+        """
+        c_name = index_name.encode("utf-8")
+        with suppress_stderr():
+            return self.lib.vdb_delete_from_delta(self.thread, c_name, vector_id)
+
+    def delta_size(self, index_name: str) -> int:
+        """
+        Returns the number of un-flushed records currently inside the LSM delta buffer.
+        
+        Args:
+            index_name (str): Target index tag.
+            
+        Returns:
+            int: Active record count.
+        """
+        c_name = index_name.encode("utf-8")
+        with suppress_stderr():
+            return self.lib.vdb_delta_size(self.thread, c_name)
+
+    def needs_flush(self, index_name: str) -> int:
+        """
+        Checks whether the LSM delta buffer size has reached or exceeded its threshold.
+        
+        Args:
+            index_name (str): Target index tag.
+            
+        Returns:
+            int: 1 if flush is required, 0 otherwise.
+        """
+        c_name = index_name.encode("utf-8")
+        with suppress_stderr():
+            return self.lib.vdb_needs_flush(self.thread, c_name)
+
+    def search_merged(self, index_name: str, query: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Performs unified search scanning both base index and real-time delta buffer.
+        
+        Unifies and resolves duplicates/tombstones directly in the native C layer before returning.
+        
+        Args:
+            index_name (str): Target index tag.
+            query (np.ndarray): 1D float32 query vector.
+            k (int): Number of neighbors to return.
+            
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: (IDs, distances) both shaped (k,).
+        """
+        c_name = index_name.encode("utf-8")
+        query_ptr = query.ctypes.data_as(ctypes.c_void_p)
+        out_ids = np.zeros(k, dtype=np.int64)
+        out_dists = np.zeros(k, dtype=np.int32)
+        ids_ptr = out_ids.ctypes.data_as(ctypes.c_void_p)
+        dists_ptr = out_dists.ctypes.data_as(ctypes.c_void_p)
+        with suppress_stderr():
+            status = self.lib.vdb_search_merged(self.thread, c_name, query_ptr, k, ids_ptr, dists_ptr)
+        if status != 0:
+            raise RuntimeError(f"vdb_search_merged failed with code: {status}")
+        return out_ids, out_dists
+
+    def backup_delta(self, index_name: str, backup_path: str) -> int:
+        """
+        Serializes the current volatile delta buffer memory state to a disk file.
+        
+        Args:
+            index_name (str): Target index tag.
+            backup_path (str): Target destination file path.
+            
+        Returns:
+            int: 0 on success, non-zero on failure.
+        """
+        c_name = index_name.encode("utf-8")
+        c_path = backup_path.encode("utf-8")
+        with suppress_stderr():
+            return self.lib.vdb_backup_delta(self.thread, c_name, c_path)
+
+    def restore_delta(self, index_name: str, restore_path: str, flush_threshold: int) -> int:
+        """
+        Restores a serialized LSM delta buffer state back into memory.
+        
+        Args:
+            index_name (str): Target index tag.
+            restore_path (str): Backup file source path.
+            flush_threshold (int): Restore capacity configuration.
+            
+        Returns:
+            int: 0 on success, non-zero on failure.
+        """
+        c_name = index_name.encode("utf-8")
+        c_path = restore_path.encode("utf-8")
+        with suppress_stderr():
+            return self.lib.vdb_restore_delta(self.thread, c_name, c_path, flush_threshold)
+
     def close(self):
+        """
+        Closes all open database indexes and cleans up the active isolate thread.
+        
+        Resets the singleton pointer to allow subsequent instantiation loops to
+        re-create a clean JVM context.
+        """
         if self.thread:
             self.lib.vdb_close(self.thread)
             # graal_tear_down_isolate is commented out to prevent macOS safepoint spin-wait hangs 
@@ -260,6 +598,9 @@ class PithosEngine:
             # self.lib.graal_tear_down_isolate(self.thread)
             self.thread = None
             self.isolate = None
+        PithosMIDB._instance = None
+
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Pithos Scale Benchmark")
@@ -345,7 +686,7 @@ def run_benchmark(trace_data=None):
         print("[Error] Pithos native library not found in search paths.", file=sys.stderr)
         sys.exit(1)
         
-    engine = PithosEngine(lib_path)
+    engine = PithosMIDB(lib_path)
     if trace_data is not None:
         trace_data["p1_library_resolution"] = time.perf_counter() - t_lib_start
 
@@ -464,9 +805,10 @@ def run_benchmark(trace_data=None):
     # 8. Teardown
     engine.close()
     
-    # Save values to pithos_metrics.json
+    # Save values to temp/benchmark_data/pithos_metrics.json
     import json
-    metrics_path = "pithos_metrics.json"
+    metrics_path = "temp/benchmark_data/pithos_metrics.json"
+    os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
     metrics_data = {}
     if os.path.exists(metrics_path):
         try:

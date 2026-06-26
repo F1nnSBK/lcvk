@@ -8,152 +8,9 @@ import numpy as np
 import faiss
 import platform
 
-# ---------------------------------------------------------------------------
-# Stderr suppression for GraalVM/Panama native warnings
-# ---------------------------------------------------------------------------
-
-@contextlib.contextmanager
-def suppress_stderr():
-    sys.stderr.flush()
-    err_fd = sys.stderr.fileno()
-    saved = os.dup(err_fd)
-    null_fd = os.open(os.devnull, os.O_RDWR)
-    os.dup2(null_fd, err_fd)
-    os.close(null_fd)
-    try:
-        yield
-    finally:
-        os.dup2(saved, err_fd)
-        os.close(saved)
-
-
-# ---------------------------------------------------------------------------
-# PithosEngine (ctypes wrapper supporting V2 API)
-# ---------------------------------------------------------------------------
-
-class GraalIsolate(ctypes.Structure):
-    pass
-
-class GraalIsolateThread(ctypes.Structure):
-    pass
-
-class PithosEngine:
-    def __init__(self, lib_path: str):
-        if not os.path.exists(lib_path):
-            raise FileNotFoundError(f"Native shared library not found at: {lib_path}")
-
-        self.lib = ctypes.CDLL(lib_path)
-        self.isolate = ctypes.POINTER(GraalIsolate)()
-        self.thread = ctypes.POINTER(GraalIsolateThread)()
-
-        self.lib.graal_create_isolate.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.POINTER(GraalIsolate)),
-            ctypes.POINTER(ctypes.POINTER(GraalIsolateThread)),
-        ]
-        self.lib.graal_create_isolate.restype = ctypes.c_int
-        
-        self.lib.vdb_init.argtypes = [ctypes.c_void_p]
-        self.lib.vdb_init.restype = ctypes.c_int
-        
-        self.lib.vdb_load_index.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
-        self.lib.vdb_load_index.restype = ctypes.c_int
-        
-        self.lib.vdb_load_index_with_weights.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int,
-        ]
-        self.lib.vdb_load_index_with_weights.restype = ctypes.c_int
-        
-        self.lib.vdb_batch_search.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p,
-            ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
-        ]
-        self.lib.vdb_batch_search.restype = ctypes.c_int
-        
-        self.lib.vdb_compile_index_file_v2.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_byte, ctypes.c_longlong,
-            ctypes.c_int, ctypes.c_void_p, ctypes.c_int,
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
-            ctypes.c_int, # q_mode
-        ]
-        self.lib.vdb_compile_index_file_v2.restype = ctypes.c_int
-        
-        self.lib.vdb_set_energy_budget.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_double,
-        ]
-        self.lib.vdb_set_energy_budget.restype = ctypes.c_int
-        
-        self.lib.vdb_close.argtypes = [ctypes.c_void_p]
-        self.lib.vdb_close.restype = ctypes.c_int
-
-        with suppress_stderr():
-            status = self.lib.graal_create_isolate(
-                None, ctypes.byref(self.isolate), ctypes.byref(self.thread)
-            )
-        if status != 0:
-            raise RuntimeError("Failed to create GraalVM isolate.")
-        with suppress_stderr():
-            status = self.lib.vdb_init(self.thread)
-        if status != 0:
-            raise RuntimeError("Failed to initialize Pithos engine.")
-
-    def compile_index_file_v2(self, path, planet_id, radius, dim, tiers, ids, vectors, q_mode):
-        with suppress_stderr():
-            return self.lib.vdb_compile_index_file_v2(
-                self.thread, path.encode(), planet_id, radius, dim,
-                tiers.ctypes.data_as(ctypes.c_void_p), len(tiers),
-                ids.ctypes.data_as(ctypes.c_void_p),
-                vectors.ctypes.data_as(ctypes.c_void_p), len(ids),
-                q_mode
-            )
-
-    def load_index(self, name, path, weights=None, lora_dim=0):
-        if weights is not None:
-            with suppress_stderr():
-                return self.lib.vdb_load_index_with_weights(
-                    self.thread, name.encode(), path.encode(),
-                    weights.ctypes.data_as(ctypes.c_void_p), lora_dim,
-                )
-        with suppress_stderr():
-            return self.lib.vdb_load_index(self.thread, name.encode(), path.encode())
-
-    def batch_search(self, name, queries, k):
-        n = queries.shape[0]
-        out_ids = np.zeros(n * k, dtype=np.int64)
-        out_dists = np.zeros(n * k, dtype=np.int32)
-        with suppress_stderr():
-            status = self.lib.vdb_batch_search(
-                self.thread, name.encode(),
-                queries.ctypes.data_as(ctypes.c_void_p), n, k,
-                out_ids.ctypes.data_as(ctypes.c_void_p),
-                out_dists.ctypes.data_as(ctypes.c_void_p),
-            )
-        if status != 0:
-            raise RuntimeError(f"batch_search failed: {status}")
-        return out_ids.reshape(n, k), out_dists.reshape(n, k)
-
-    def set_energy_budget(self, name, tau):
-        with suppress_stderr():
-            return self.lib.vdb_set_energy_budget(
-                self.thread, name.encode(), ctypes.c_double(tau)
-            )
-
-    def close(self):
-        if self.thread:
-            self.lib.vdb_close(self.thread)
-            self.thread = None
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def get_lib_path():
-    ext = "dylib" if platform.system() == "Darwin" else "so"
-    for p in [f"./target/libpithos.{ext}", f"./build-output/libpithos.{ext}", f"./libpithos.{ext}"]:
-        if os.path.exists(p):
-            return p
-    raise FileNotFoundError("Pithos native library not found.")
+# PYTHONPATH fallback and PithosMIDB Import
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from benchmark import PithosMIDB
 
 
 def compute_recall_at_k(gt_ids: np.ndarray, pred_ids: np.ndarray, k: int) -> float:
@@ -241,9 +98,7 @@ def main():
     print(f"FAISS batch search finished in {t_faiss * 1000:.2f} ms")
 
     # Load engine
-    lib_path = get_lib_path()
-    print(f"Loading native library: {lib_path}")
-    engine = PithosEngine(lib_path)
+    engine = PithosMIDB()
 
     # Load weights
     if os.path.exists(weights_path):
@@ -279,7 +134,7 @@ def main():
 
         # Ingestion
         t_ingest_start = time.perf_counter()
-        status = engine.compile_index_file_v2(db_file, 1, 1737400, DIMENSION, TIERS, ids, db_vectors, mode["q_mode"])
+        status = engine.compile_index_file(db_file, 1, 1737400, DIMENSION, TIERS, ids, db_vectors, mode["q_mode"])
         t_ingest = time.perf_counter() - t_ingest_start
         if status != 0:
             print(f"[Error] compilation failed with status: {status}")
