@@ -155,3 +155,19 @@ Die Verschiebung des Crossover-Punkts nach oben bei der kleineren Test-Datenbank
 
 Skaliert die Datenbank jedoch auf das reale Szenario von **1.000.000 Vektoren**, sprengt FAISS die Cache-Größen vollständig ($256\text{ MB}$ bei D=64) und läuft in das Speicherbandbreiten-Limit (Memory Bandwidth Bottleneck). Pithos hingegen benötigt dank der 1-Bit-Quantisierung für 1 Million Vektoren nur **8 Megabyte**, bleibt vollständig im L3-Cache und schlägt FAISS daher bereits ab **D=64**.
 
+---
+
+## Ablation Study: FlatIndex-Optimierung (Lazy Loading)
+
+Um den Einfluss der On-Demand-Speicherladung der Tiers in `FlatIndex` zu quantifizieren, führen wir eine Ablation-Studie durch:
+- **Baseline (Vorabladen aller Tiers):** Vorab-Kopieren aller Tiers in lokale Register vor jedem Query-Vergleich.
+- **Lazy Loading (On-Demand):** Laden höherer Tiers nur bei Erreichen der jeweiligen Distanzstufe.
+
+### Vergleich der Performanz-Metriken (100k Records, D=384, Lunar Dataset)
+
+| Konfiguration | Single-Query Latency (D=384) | Multi-Query Throughput (D=384) | Resonant Voting Durchsatz | Resonant Voting Speedup |
+| :--- | :---: | :---: | :---: | :---: |
+| Baseline (Vorabladen) | 1.0260 ms | 129.56 MVPS | 3,787.62 MVPS | 102.6x (vs. FAISS) |
+| **Optimiert (Lazy Loading)**| **0.8164 ms** | **167.33 MVPS** | **4,834.78 MVPS** | **131.7x (vs. FAISS)** |
+
+

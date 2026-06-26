@@ -254,8 +254,8 @@ Pithos transforms, binarizes, and indexes raw float vectors into 384-bit Matryos
 
 <!-- BENCHMARK_METRICS_START -->
 #### Search Execution Performance (Host-Native macOS)
-- **Scan Latency:** **221.07 ms** mean latency for 100,000 records (278 queries)
-- **Throughput:** **125.75 MVPS** (using lock-free multi-family resonant voting, peak memory: **950.8 MB**)
+- **Scan Latency:** **257.29 ms** mean latency for 100,000 records (278 queries)
+- **Throughput:** **108.05 MVPS** (using lock-free multi-family resonant voting, peak memory: **950.7 MB**)
 
 ### 2. High-Performance Native Performance vs. Baselines & Virtualization
 
@@ -265,9 +265,9 @@ Bypassing Docker Desktop's virtualization layer and running natively on the macO
 |---|---|
 | Sequential JIT Compiled Baseline (float L2) | 4.52 MVPS |
 | FAISS Flat L2 (CPU Native) | 75.38 MVPS |
-| **Pithos -- Host-Native macOS** | **125.75 MVPS** (Peak Memory: **950.8 MB**) |
+| **Pithos -- Host-Native macOS** | **108.05 MVPS** (Peak Memory: **950.7 MB**) |
 
-Host-native Pithos achieves a **~27.8x speedup** over the JIT baseline and a **~1.7x speedup** over native FAISS Flat L2.
+Host-native Pithos achieves a **~23.9x speedup** over the JIT baseline and a **~1.4x speedup** over native FAISS Flat L2.
 
 ### 3. Dimensionality Crossover Analysis (Pithos vs FAISS Flat L2)
 
@@ -275,15 +275,15 @@ Measured on 100,000 records with K=100. Single-query measures raw FFI point-look
 
 | D | Single-Query Latency (Pithos) | Single-Query Latency (FAISS) | Multi-Query MVPS (Pithos) | Multi-Query MVPS (FAISS) | Speedup |
 |---:|---:|---:|---:|---:|---:|
-| 16 | 807.9 us | 227.1 us | 217.43 | 2,368.48 | -10.9x |
-| 32 | 664.0 us | 308.7 us | 206.40 | 1,644.87 | -8.0x |
-| 64 | 686.9 us | 514.0 us | 202.43 | 852.50 | -4.2x |
-| 128 | 829.6 us | 973.2 us | 166.39 | 311.28 | -1.9x |
-| 256 | 985.0 us | 2,116.8 us | 150.54 | 158.04 | -1.0x |
-| 384 | 1,040.9 us | 3,190.1 us | 136.90 | 91.68 | 1.5x |
-| 512 | 1,268.6 us | 4,169.1 us | 124.85 | 66.52 | 1.9x |
-| 768 | 1,275.1 us | 6,105.2 us | 105.54 | 32.58 | 3.2x |
-| 1024 | 1,371.4 us | 7,816.5 us | 93.27 | 28.86 | 3.2x |
+| 16 | 587.2 us | 269.1 us | 213.28 | 2,123.18 | -10.0x |
+| 32 | 645.8 us | 291.7 us | 192.82 | 1,476.60 | -7.7x |
+| 64 | 692.0 us | 569.8 us | 193.97 | 698.70 | -3.6x |
+| 128 | 782.5 us | 978.6 us | 153.45 | 341.28 | -2.2x |
+| 256 | 956.3 us | 2,017.0 us | 137.93 | 157.93 | -1.1x |
+| 384 | 1,317.4 us | 3,283.2 us | 112.00 | 98.54 | 1.1x |
+| 512 | 1,147.5 us | 3,954.0 us | 106.51 | 70.50 | 1.5x |
+| 768 | 1,359.1 us | 5,650.2 us | 87.94 | 42.34 | 2.1x |
+| 1024 | 1,708.3 us | 8,189.9 us | 82.35 | 31.20 | 2.6x |
 
 **Single-Query Crossover:** D=64 -> D=128 (faiss -> pithos)
 **Multi-Query Crossover:** D=256 -> D=384 (faiss -> pithos)
@@ -297,7 +297,7 @@ To verify Pithos's generalization, we benchmark on the standard **SIFT10K** data
 | Recall@1 | 100.00% | 36.00% | - |
 | Recall@10 | 100.00% | 41.60% | - |
 | Recall@100 | 100.00% | 52.85% | - |
-| Query Latency (ms) | 3.21 ms | 33.63 ms | 0.10x |
+| Query Latency (ms) | 3.04 ms | 36.76 ms | 0.08x |
 
 For extremely small databases like SIFT10K (N=10,000), FAISS Flat L2 runs with minimal CPU cache footprint. Pithos's 1-bit Matryoshka recall follows the theoretical error bounds for 128 dimensions.
 
@@ -306,9 +306,9 @@ For extremely small databases like SIFT10K (N=10,000), FAISS Flat L2 runs with m
 We measure the exact roundtrip latency of crossing the Python-to-C boundary (via ctypes) into the GraalVM isolate thread:
 
 - **Total iterations:** 100,000 calls
-- **Average FFI roundtrip latency:** **0.1871 µs**
-- **Pure Python no-op call overhead:** **0.0286 µs**
-- **Net FFI boundary crossing overhead:** **0.1584 µs**
+- **Average FFI roundtrip latency:** **0.1867 µs**
+- **Pure Python no-op call overhead:** **0.0353 µs**
+- **Net FFI boundary crossing overhead:** **0.1513 µs**
 
 This FFI crossing overhead of < 0.2 microseconds is tiny, explaining why Pithos matches/beats native C++ FAISS even for low-dimensional single-query lookups.
 

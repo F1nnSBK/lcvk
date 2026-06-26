@@ -289,6 +289,32 @@ public class TransformOperator {
     }
 
     /**
+     * Computes exact L2 squared distance between a float query and a float DB vector.
+     * Uses the Java Vector API (SIMD) for acceleration when dimension >= SPECIES.length().
+     *
+     * @param query rotated float query vector
+     * @param db    rotated float DB vector
+     * @return L2 squared distance
+     */
+    public float computeL2Float(float[] query, float[] db) {
+        int n = Math.min(query.length, db.length);
+        float sum = 0.0f;
+        int i = 0;
+        int upper = SPECIES.loopBound(n);
+        for (; i < upper; i += SPECIES.length()) {
+            FloatVector vq = FloatVector.fromArray(SPECIES, query, i);
+            FloatVector vd = FloatVector.fromArray(SPECIES, db, i);
+            FloatVector diff = vq.sub(vd);
+            sum += diff.mul(diff).reduceLanes(VectorOperators.ADD);
+        }
+        for (; i < n; i++) {
+            float diff = query[i] - db[i];
+            sum += diff * diff;
+        }
+        return sum;
+    }
+
+    /**
      * Back-projects a target transformed vector z to raw input space x.
      * Since H_BD and D_pre are orthogonal/symmetric, back-projecting is
      * self-inverse.
