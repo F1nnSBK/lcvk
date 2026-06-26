@@ -86,6 +86,11 @@ class PithosEngine:
         self.lib.vdb_close.argtypes = [ctypes.c_void_p]
         self.lib.vdb_close.restype = ctypes.c_int
 
+        self.lib.vdb_set_chunk_size = getattr(self.lib, "vdb_set_chunk_size", None)
+        if self.lib.vdb_set_chunk_size is not None:
+            self.lib.vdb_set_chunk_size.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_longlong]
+            self.lib.vdb_set_chunk_size.restype = ctypes.c_int
+
         with suppress_stderr():
             status = self.lib.graal_create_isolate(
                 None, ctypes.byref(self.isolate), ctypes.byref(self.thread)
@@ -140,6 +145,13 @@ class PithosEngine:
         if status != 0:
             raise RuntimeError(f"Search failed with code: {status}")
         return out_ids, out_distances
+
+    def set_chunk_size(self, index_name: str, chunk_size: int) -> int:
+        if self.lib.vdb_set_chunk_size is not None:
+            name_bytes = index_name.encode("utf-8")
+            with suppress_stderr():
+                return self.lib.vdb_set_chunk_size(self.thread, name_bytes, chunk_size)
+        return 0
 
     def close(self):
         if self.thread:
@@ -234,6 +246,9 @@ def run_pithos_search(
     if status != 0:
         engine.close()
         raise RuntimeError(f"Index load failed for dim {dim}")
+
+    # Set optimal chunk size to fully utilize multi-core on smaller datasets (100k)
+    engine.set_chunk_size("sweep", 5000)
 
     # Warmup pass
     warmup_q = queries[:min(5, queries.shape[0])]

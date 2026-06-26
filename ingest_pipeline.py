@@ -61,7 +61,8 @@ if HAS_TORCH:
                     self.model = PeftModel.from_pretrained(
                         self.backbone,
                         lora_repo,
-                        config=lora_config
+                        config=lora_config,
+                        force_download=True
                     )
                     self.model.to(self.device)
                     self.model.eval()

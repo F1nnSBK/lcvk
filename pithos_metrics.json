@@ -1,0 +1,7 @@
+{
+  "best_mvps": 125.75202424594183,
+  "best_time_ms": 221.06999999959953,
+  "best_latency_us": 795.215827336689,
+  "peak_mem_mb": 950.8125,
+  "canary_status": "PASSED"
+}

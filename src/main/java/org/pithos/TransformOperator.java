@@ -129,18 +129,37 @@ public class TransformOperator {
             float c = (float) (1.0 / Math.sqrt(1.0 + t * t));
             float s = t * c;
 
+            // Perform Jacobi rotation using Java Vector API on rows A[p] and A[q]
+            int i = 0;
+            int upper = SPECIES.loopBound(n);
+            for (; i < upper; i += SPECIES.length()) {
+                FloatVector vp = FloatVector.fromArray(SPECIES, A[p], i);
+                FloatVector vq = FloatVector.fromArray(SPECIES, A[q], i);
+                
+                FloatVector vpNew = vp.mul(c).sub(vq.mul(s));
+                FloatVector vqNew = vp.mul(s).add(vq.mul(c));
+                
+                vpNew.intoArray(A[p], i);
+                vqNew.intoArray(A[q], i);
+            }
+            for (; i < n; i++) {
+                float ap = A[p][i];
+                float aq = A[q][i];
+                A[p][i] = c * ap - s * aq;
+                A[q][i] = s * ap + c * aq;
+            }
+
+            // Correct diagonal and intersection values (overwritten by loop)
             A[p][q] = 0.0f;
+            A[q][p] = 0.0f;
             A[p][p] = app - t * apq;
             A[q][q] = aqq + t * apq;
 
-            for (int i = 0; i < n; i++) {
-                if (i != p && i != q) {
-                    float aip = A[i][p];
-                    float aiq = A[i][q];
-                    A[i][p] = c * aip - s * aiq;
-                    A[p][i] = A[i][p];
-                    A[i][q] = s * aip + c * aiq;
-                    A[q][i] = A[i][q];
+            // Maintain symmetry: copy rows back to columns
+            for (int j = 0; j < n; j++) {
+                if (j != p && j != q) {
+                    A[j][p] = A[p][j];
+                    A[j][q] = A[q][j];
                 }
             }
         }
@@ -255,7 +274,13 @@ public class TransformOperator {
      */
     public static float calculatePercentileThreshold(float[] z, float percentile) {
         float[] absValues = new float[z.length];
-        for (int i = 0; i < z.length; i++) {
+        int i = 0;
+        int upper = SPECIES.loopBound(z.length);
+        for (; i < upper; i += SPECIES.length()) {
+            FloatVector vz = FloatVector.fromArray(SPECIES, z, i);
+            vz.abs().intoArray(absValues, i);
+        }
+        for (; i < z.length; i++) {
             absValues[i] = Math.abs(z[i]);
         }
         Arrays.sort(absValues);

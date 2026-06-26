@@ -321,6 +321,75 @@ public class CApi {
         }
     }
 
+    /**
+     * Retrieves the raw off-heap memory address and length of a specific index tier.
+     * Useful for FPGA / GPU DMA direct memory transfers.
+     */
+    @CEntryPoint(name = "vdb_get_tier_address")
+    public static int getTierAddress(IsolateThread thread, CCharPointer indexName, int tierIdx,
+                                     CLongPointer outAddress, CLongPointer outLength) {
+        if (db == null) {
+            return -1;
+        }
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            Index index = db.getIndex(idxName);
+            if (index == null) {
+                return -2;
+            }
+            if (index instanceof FlatIndex) {
+                FlatIndex flatIdx = (FlatIndex) index;
+                long addr = flatIdx.getTierAddress(tierIdx);
+                long len = flatIdx.getTierByteSize(tierIdx);
+                if (addr == 0) {
+                    return -3; // Invalid tier index
+                }
+                outAddress.write(0, addr);
+                outLength.write(0, len);
+                return 0;
+            }
+            return -6; // Unsupported index type
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Binarizes a single float vector using the index's Rademacher preconditioning + FWHT rotation.
+     * Output packed array must be pre-allocated (dimension / 64 longs).
+     */
+    @CEntryPoint(name = "vdb_transform_and_quantize")
+    public static int transformAndQuantize(IsolateThread thread, CCharPointer indexName, CFloatPointer inVector, CLongPointer outPacked) {
+        if (db == null) {
+            return -1;
+        }
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            Index index = db.getIndex(idxName);
+            if (index == null) {
+                return -2;
+            }
+            if (index instanceof FlatIndex) {
+                FlatIndex flatIdx = (FlatIndex) index;
+                int dim = flatIdx.getDimension();
+                float[] javaVector = new float[dim];
+                for (int j = 0; j < dim; j++) {
+                    javaVector[j] = inVector.read(j);
+                }
+                long[] packed = flatIdx.getTransformOperator().transformAndQuantize(javaVector);
+                for (int i = 0; i < packed.length; i++) {
+                    outPacked.write(i, packed[i]);
+                }
+                return 0;
+            }
+            return -6;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
     @CEntryPoint(name = "vdb_close")
     public static int closeDb(IsolateThread thread) {
         if (db != null) {

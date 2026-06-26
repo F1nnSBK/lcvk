@@ -215,6 +215,40 @@ public class FlatIndex implements Index {
         this.ringBuffer = this.disruptor.start();
     }
 
+    public long getTierAddress(int tierIdx) {
+        if (tierIdx < 0 || tierIdx >= numTiers) {
+            return 0;
+        }
+        return tierSegments[tierIdx].address();
+    }
+
+    public long getTierByteSize(int tierIdx) {
+        if (tierIdx < 0 || tierIdx >= numTiers) {
+            return 0;
+        }
+        return tierSegments[tierIdx].byteSize();
+    }
+
+    public long getMetadataAddress() {
+        return metadataSegment.address();
+    }
+
+    public long getMetadataByteSize() {
+        return metadataSegment.byteSize();
+    }
+
+    public long getIdsAddress() {
+        return idsSegment.address();
+    }
+
+    public long getIdsByteSize() {
+        return idsSegment.byteSize();
+    }
+
+    public TransformOperator getTransformOperator() {
+        return transformOperator;
+    }
+
     public static FlatIndex mapFile(String basePath, float[] weights, int loraDim) throws IOException {
         Path mainPath = Path.of(basePath);
         if (!mainPath.toFile().exists()) {
