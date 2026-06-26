@@ -200,8 +200,11 @@ int vdb_load_index_with_weights(graal_isolatethead_t* thread, char* name, char* 
 // Retrieves database metadata attributes (dimension, size, planet settings, tiers count)
 int vdb_get_info(graal_isolatethead_t* thread, char* indexName, int* outDimension, long long* outSize, char* outPlanetId, long long* outPlanetRadius, int* outTiersCount);
 
-// Compiles raw float records into a multi-tier database file layout
+// Compiles raw float records into a multi-tier database file layout (quantization mode 0 by default)
 int vdb_compile_index_file(graal_isolatethead_t* thread, char* path, byte planetId, long long planetRadius, int dimension, int* tiers, int numTiers, long long* ids, float* vectors, int numRecords);
+
+// Compiles raw float records into a multi-tier database file layout with configurable quantization (qMode: 0=1-bit, 1=2-bit, 2=float32)
+int vdb_compile_index_file_v2(graal_isolatethead_t* thread, char* path, byte planetId, long long planetRadius, int dimension, int* tiers, int numTiers, long long* ids, float* vectors, int numRecords, int qMode);
 
 // Batch KNN search over raw float vectors
 int vdb_batch_search(graal_isolatethead_t* thread, char* indexName, float* queries, int numQueries, int k, long long* outIds, int* outDistances);
@@ -226,7 +229,51 @@ int vdb_close(graal_isolatethead_t* thread);
 
 // Tears down GraalVM isolate thread
 int graal_tear_down_isolate(graal_isolatethead_t* thread);
+
+// LSM Writeable Delta-Buffer Functions:
+// Creates a writeable in-memory delta buffer for an index
+int vdb_create_delta_buffer(graal_isolatethead_t* thread, char* indexName, int flushThreshold);
+
+// Inserts a raw float vector into the writeable delta buffer
+int vdb_insert(graal_isolatethead_t* thread, char* indexName, long long id, float* vector);
+
+// Marks a record as deleted (tombstoned) in the delta buffer
+int vdb_delete_from_delta(graal_isolatethead_t* thread, char* indexName, long long id);
+
+// Returns current record count in the delta buffer
+int vdb_delta_size(graal_isolatethead_t* thread, char* indexName);
+
+// Returns 1 if delta buffer size exceeds flush threshold, 0 otherwise
+int vdb_needs_flush(graal_isolatethead_t* thread, char* indexName);
+
+// Runs a unified batch search across both base index and writeable delta buffer
+int vdb_search_merged(graal_isolatethead_t* thread, char* indexName, float* queries, int numQueries, int k, long long* outIds, int* outDistances);
+
+// Backups/flushes the current delta buffer state into a binary backup file
+int vdb_backup_delta(graal_isolatethead_t* thread, char* indexName, char* backupPath);
+
+// Restores delta buffer state from a binary backup file
+int vdb_restore_delta(graal_isolatethead_t* thread, char* indexName, char* backupPath);
 ```
+
+### C-API Configuration Guide
+
+#### 1. Quantization & Formats (`qMode`)
+Configured during compilation via the `qMode` parameter in `vdb_compile_index_file_v2`. The mode is saved in the header and automatically applied at load time:
+- **`0`**: 1-bit sign-only (highest compression).
+- **`1`**: 2-bit ternary (active mask + signs, enabling exact asymmetric binary/ternary distance estimators).
+- **`2`**: Float-hybrid raw bypass (skips quantization, saves raw rotated float32 values for low dimensions).
+
+#### 2. FP16 Stage 2 Reranking
+When you compile an index, Pithos automatically exports the raw vectors in IEEE 754 half-precision to a sidecar file named `<basePath>_fp16.bin`. 
+- **Auto-detection**: If Pithos finds this file when loading the index via `vdb_load_index`, it maps it off-heap and enables Stage 2 FP16 point-lookup reranking automatically.
+- **Dynamic Fallback**: If deleted or absent, the search path dynamically falls back to asymmetric binary/ternary estimation.
+- **Bulk FFM Copy Optimization**: POINT-lookup accesses during Stage 2 are optimized using native FFM `MemorySegment.copy` (bulk copies replacing element-by-element off-heap JVM crossings) to deliver native speedups over FAISS.
+
+#### 3. Search & Runtime Parameters
+- **Information Budget ($\tau$)**: Change the dynamic pruning threshold on the fly via `vdb_set_energy_budget`. E.g., setting $\tau = 0.90$ bypasses columns corresponding to less significant singular vectors, reducing memory bandwidth usage.
+- **Parallel Chunk Size**: Optimize Disruptor worker granularity using `vdb_set_chunk_size`.
+
 
 ---
 
@@ -254,8 +301,8 @@ Pithos transforms, binarizes, and indexes raw float vectors into 384-bit Matryos
 
 <!-- BENCHMARK_METRICS_START -->
 #### Search Execution Performance (Host-Native macOS)
-- **Scan Latency:** **251.93 ms** mean latency for 100,000 records (278 queries)
-- **Throughput:** **110.35 MVPS** (using lock-free multi-family resonant voting, peak memory: **985.6 MB**)
+- **Scan Latency:** **227.72 ms** mean latency for 100,000 records (278 queries)
+- **Throughput:** **122.08 MVPS** (using lock-free multi-family resonant voting, peak memory: **1,059.8 MB**)
 
 ### 2. High-Performance Native Performance vs. Baselines & Virtualization
 
@@ -265,9 +312,9 @@ Bypassing Docker Desktop's virtualization layer and running natively on the macO
 |---|---|
 | Sequential JIT Compiled Baseline (float L2) | 3.71 MVPS |
 | FAISS Flat L2 (CPU Native) | 94.41 MVPS |
-| **Pithos -- Host-Native macOS** | **110.35 MVPS** (Peak Memory: **985.6 MB**) |
+| **Pithos -- Host-Native macOS** | **122.08 MVPS** (Peak Memory: **1,059.8 MB**) |
 
-Host-native Pithos achieves a **~29.7x speedup** over the JIT baseline and a **~1.2x speedup** over native FAISS Flat L2.
+Host-native Pithos achieves a **~32.9x speedup** over the JIT baseline and a **~1.3x speedup** over native FAISS Flat L2.
 
 ### 3. Dimensionality Crossover Analysis (Pithos vs FAISS Flat L2)
 
@@ -275,18 +322,18 @@ Measured on 100,000 records with K=100. Single-query measures raw FFI point-look
 
 | D | Single-Query Latency (Pithos) | Single-Query Latency (FAISS) | Multi-Query MVPS (Pithos) | Multi-Query MVPS (FAISS) | Speedup |
 |---:|---:|---:|---:|---:|---:|
-| 16 | 1,168.2 us | 245.1 us | 205.25 | 2,614.98 | -12.7x |
-| 32 | 1,268.8 us | 300.3 us | 201.85 | 1,697.18 | -8.4x |
-| 64 | 1,233.6 us | 473.2 us | 191.69 | 876.46 | -4.6x |
-| 128 | 1,552.5 us | 974.7 us | 169.02 | 382.67 | -2.3x |
-| 256 | 2,122.8 us | 1,915.3 us | 134.03 | 164.13 | -1.2x |
-| 384 | 2,168.4 us | 2,965.1 us | 115.48 | 103.67 | 1.1x |
-| 512 | 2,225.4 us | 4,525.7 us | 107.92 | 72.17 | 1.5x |
-| 768 | 2,590.0 us | 6,104.5 us | 83.05 | 40.27 | 2.1x |
-| 1024 | 2,751.2 us | 8,180.5 us | 77.28 | 32.24 | 2.4x |
+| 16 | 1,408.0 us | 237.0 us | 205.01 | 2,710.92 | -13.2x |
+| 32 | 1,503.6 us | 295.0 us | 201.62 | 1,565.13 | -7.8x |
+| 64 | 1,273.0 us | 484.2 us | 195.72 | 848.84 | -4.3x |
+| 128 | 1,492.8 us | 1,006.3 us | 168.04 | 410.80 | -2.4x |
+| 256 | 1,753.9 us | 1,982.0 us | 138.33 | 170.02 | -1.2x |
+| 384 | 2,069.8 us | 3,105.6 us | 117.60 | 103.27 | 1.1x |
+| 512 | 2,141.9 us | 3,976.1 us | 107.37 | 77.22 | 1.4x |
+| 768 | 2,592.8 us | 5,845.1 us | 87.94 | 42.55 | 2.1x |
+| 1024 | 2,782.3 us | 7,525.0 us | 79.33 | 32.27 | 2.5x |
 
+**Single-Query Crossover:** D=128 -> D=256 (faiss -> pithos)
 **Multi-Query Crossover:** D=256 -> D=384 (faiss -> pithos)
-**Single-Query Crossover:** D=256 -> D=384 (faiss -> pithos)
 
 ### 6. SIFT10K Generalization Benchmark
 
