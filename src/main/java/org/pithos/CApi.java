@@ -16,6 +16,28 @@ import java.util.List;
 /**
  * C-API entry points for the Pithos binary vector database.
  * Exposes methods to native callers using GraalVM {@link CEntryPoint}.
+ *
+ * <p><h3>Memory Management Guidelines:</h3>
+ * <ul>
+ *   <li>The C caller is responsible for allocating and freeing all pointers passed for outputs
+ *       (e.g., {@code outIds}, {@code outDistances}, {@code votingMask}).</li>
+ *   <li>Pithos loads indices off-heap via memory-mapping ({@code mmap}), keeping them in read-only
+ *       virtual memory segments. These are freed when the database is closed or the index is dropped.</li>
+ *   <li>Direct off-heap memory addresses can be retrieved via {@link #getTierAddress} for direct
+ *       FPGA DMA transfers or GPU execution.</li>
+ * </ul>
+ *
+ * <p><h3>API Return Codes:</h3>
+ * <table>
+ *   <tr><th>Code</th><th>Name</th><th>Description</th></tr>
+ *   <tr><td>0</td><td>SUCCESS</td><td>Operation completed successfully.</td></tr>
+ *   <tr><td>-1</td><td>ERR_DB_NOT_INIT</td><td>The global database coordinator is not initialized. Call {@link #init} first.</td></tr>
+ *   <tr><td>-2</td><td>ERR_INDEX_NOT_FOUND</td><td>The requested index name is not mapped.</td></tr>
+ *   <tr><td>-3</td><td>ERR_INVALID_OPERATION</td><td>The operation is not supported by this index type (e.g., chunking on a non-Flat index).</td></tr>
+ *   <tr><td>-4</td><td>ERR_INTERNAL_EXCEPTION</td><td>An unexpected internal Java exception occurred. Trace printed to stderr.</td></tr>
+ *   <tr><td>-5</td><td>ERR_FILE_IO</td><td>Could not read or write file(s) on the disk.</td></tr>
+ *   <tr><td>-6</td><td>ERR_UNSUPPORTED_LAYOUT</td><td>The index structure/layout does not match the operation.</td></tr>
+ * </table>
  */
 public class CApi {
     private static VectorDb db;
@@ -24,6 +46,10 @@ public class CApi {
 
     /**
      * Initializes the global database coordinator.
+     * Must be called once before performing any database operations.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @return 0 on success, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_init")
     public static int init(IsolateThread thread) {
@@ -37,7 +63,14 @@ public class CApi {
     }
 
     /**
-     * Maps an existing database off-heap in the virtual memory without custom weights.
+     * Maps an existing compiled database off-heap into virtual memory without custom weights.
+     * Use this when the index was compiled with a static energy layout, or when using an
+     * equal energy distribution fallback.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param name C string specifying the unique logical name to register the loaded index under
+     * @param path C string specifying the base filepath of the compiled index on disk
+     * @return 0 on success, -1 if database not initialized, -5 on File I/O error, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_load_index")
     public static int loadIndex(IsolateThread thread, CCharPointer name, CCharPointer path) {
@@ -50,7 +83,7 @@ public class CApi {
             db.loadIndex(indexName, filePath, null, 0);
             return 0;
         } catch (IOException e) {
-            return -5; // FILE IO ERROR
+            return -5;
         } catch (Throwable t) {
             t.printStackTrace();
             return -4;
@@ -58,7 +91,16 @@ public class CApi {
     }
 
     /**
-     * Maps an existing database off-heap, supplying frozen LoRA weights.
+     * Maps an existing compiled database off-heap, supplying frozen model weights.
+     * The model weights are used to compute SVD singular values, constructing the Matryoshka
+     * energy cumulative distribution to dynamically target a recall energy budget during queries.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param name C string specifying the unique logical name to register the loaded index under
+     * @param path C string specifying the base filepath of the compiled index on disk
+     * @param weights C float array pointer storing the frozen projection/LoRA weights matrix of size {@code (dimension * loraDim)}
+     * @param loraDim the inner bottleneck dimension of the LoRA weights matrix (D0)
+     * @return 0 on success, -1 if database not initialized, -5 on File I/O error, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_load_index_with_weights")
     public static int loadIndexWithWeights(IsolateThread thread, CCharPointer name, CCharPointer path,
@@ -90,13 +132,22 @@ public class CApi {
     }
 
     /**
-     * Retrieves database information metadata attributes.
+     * Retrieves metadata attributes for a loaded index.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target loaded index
+     * @param outDimension output pointer populated with the vector dimensionality (D)
+     * @param outSize output pointer populated with the total record count (N)
+     * @param outPlanetId output pointer populated with the associated Planet ID code
+     * @param outPlanetRadius output pointer populated with the associated Planet Radius in meters
+     * @param outTiersCount output pointer populated with the total number of cumulative search tiers
+     * @return 0 on success, -1 if database not initialized, -2 if index not found, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_get_info")
     public static int getInfo(IsolateThread thread, CCharPointer indexName,
-                              CIntPointer outDimension, CLongPointer outSize,
-                              CCharPointer outPlanetId, CLongPointer outPlanetRadius,
-                              CIntPointer outTiersCount) {
+                               CIntPointer outDimension, CLongPointer outSize,
+                               CCharPointer outPlanetId, CLongPointer outPlanetRadius,
+                               CIntPointer outTiersCount) {
         if (db == null) {
             return -1;
         }
@@ -120,7 +171,17 @@ public class CApi {
     }
 
     /**
-     * Performs a batch KNN search on float vectors.
+     * Performs a batch KNN search on raw float query vectors.
+     * Evaluates candidates off-heap and returns their resolved record IDs and scores.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target index to scan
+     * @param queries contiguous C float array pointer storing query vectors of size {@code (numQueries * dimension)}
+     * @param numQueries number of query vectors in the batch
+     * @param k number of nearest neighbors to retrieve per query (top-K)
+     * @param outIds pre-allocated C long array pointer of size {@code (numQueries * k)} to store output record IDs
+     * @param outDistances pre-allocated C int array pointer of size {@code (numQueries * k)} to store output metric distances (scaled by 1,000,000)
+     * @return 0 on success, -1 if database not initialized, -2 if index not found, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_batch_search")
     public static int batchSearch(IsolateThread thread, CCharPointer indexName, CFloatPointer queries, int numQueries, int k,
@@ -168,7 +229,17 @@ public class CApi {
     }
 
     /**
-     * Performs a batch search and outputs matching candidate votes into the pre-allocated voting mask.
+     * Performs a batch search and outputs matching candidate votes into a pre-allocated voting mask.
+     * Designed for multi-family resonant voting across scientific criteria.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target index
+     * @param queries contiguous C float array pointer storing query vectors of size {@code (numQueries * dimension)}
+     * @param queryFamilies C int array pointer of size {@code (numQueries)} defining the semantic family index (0-7) for each query
+     * @param queryThresholds C int array pointer of size {@code (numQueries)} defining the Hamming distance threshold for each query
+     * @param numQueries number of queries in the batch
+     * @param votingMask pre-allocated C byte array pointer of size {@code (totalRecords)} that accumulates family bitmasks (OR-ed)
+     * @return the number of resonant records (i.e., records with a non-zero voting mask), or negative error code on failure
      */
     @CEntryPoint(name = "vdb_query_planetary_grid")
     public static long queryPlanetaryGrid(IsolateThread thread, CCharPointer indexName, CFloatPointer queries,
@@ -211,6 +282,7 @@ public class CApi {
 
     /**
      * Compiles raw float records into a multi-tier database file layout.
+     * Legacy wrapper delegating to {@link #compileIndexFileV2} with default 1-bit quantization (qMode=0).
      */
     @CEntryPoint(name = "vdb_compile_index_file")
     public static int compileIndexFile(IsolateThread thread, CCharPointer path, byte planetId, long planetRadius,
@@ -220,7 +292,22 @@ public class CApi {
     }
 
     /**
-     * Compiles raw float records into a multi-tier database file layout with qMode.
+     * Compiles raw float records into a multi-tier database file layout with configurable quantization.
+     * This method writes the core config header, IDs file, metadata file, tier binary tables, and
+     * the FP16 sidecar file for Stage 2 reranking.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param path C string base filepath to compile the index files to
+     * @param planetId associated planetary target identifier code (e.g., 1 for Moon, 2 for Mars)
+     * @param planetRadius radius of the target planet in meters (used for spatial projection checks)
+     * @param dimension dimensionality of the input float vectors
+     * @param tiers C int array defining dimension boundaries for each Matryoshka cumulative energy tier
+     * @param numTiers number of cumulative energy tiers defined
+     * @param ids C long array containing unique identifiers for each record
+     * @param vectors C float array storing the raw vector representations of size {@code (numRecords * dimension)}
+     * @param numRecords total count of vectors to compile
+     * @param qMode quantization mode: 0 = 1-bit sign, 1 = 2-bit ternary, 2 = float32 bypass
+     * @return 0 on success, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_compile_index_file_v2")
     public static int compileIndexFileV2(IsolateThread thread, CCharPointer path, byte planetId, long planetRadius,
@@ -252,6 +339,13 @@ public class CApi {
         }
     }
 
+    /**
+     * Returns the total record count (N) for a loaded index.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the index
+     * @return total record count on success, -1 if database not initialized, or -2 if index not found
+     */
     @CEntryPoint(name = "vdb_size")
     public static long size(IsolateThread thread, CCharPointer indexName) {
         if (db == null) {
@@ -265,6 +359,13 @@ public class CApi {
         return index.size();
     }
 
+    /**
+     * Unmaps and drops an index from the database memory space, releasing all associated file mappings.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the index to drop
+     * @return 0 on success, -1 if database not initialized, or -2 if index not found
+     */
     @CEntryPoint(name = "vdb_drop_index")
     public static int dropIndex(IsolateThread thread, CCharPointer indexName) {
         if (db == null) {
@@ -274,6 +375,16 @@ public class CApi {
         return db.dropIndex(idxName) ? 0 : -2;
     }
 
+    /**
+     * Adjusts the parallel scan chunk size (granularity) for multi-threaded search dispatching.
+     * Larger chunk sizes decrease thread coordination overhead, whereas smaller chunk sizes
+     * enable better load balancing for high core-count CPUs.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target FlatIndex
+     * @param chunkSize number of records to process per parallel thread worker chunk
+     * @return 0 on success, -1 if database not initialized, -2 if index not found, -3 if index type is not FlatIndex, or -4 on internal exception
+     */
     @CEntryPoint(name = "vdb_set_chunk_size")
     public static int setChunkSize(IsolateThread thread, CCharPointer indexName, long chunkSize) {
         if (db == null) {
@@ -297,7 +408,13 @@ public class CApi {
     }
 
     /**
-     * Sets dynamic target energy budget tau (e.g. 0.90) for FlatIndex.
+     * Sets the dynamic target energy budget threshold (tau) for early-exit tier truncation.
+     * Budgets are mapped to cumulative spectral energy computed from the LoRA adaptation weights.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target FlatIndex
+     * @param tau target cumulative variance representation budget (e.g., 0.90 to use active tiers capturing 90% variance)
+     * @return 0 on success, -1 if database not initialized, -2 if index not found, -3 if index type is not FlatIndex, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_set_energy_budget")
     public static int setEnergyBudget(IsolateThread thread, CCharPointer indexName, double tau) {
@@ -322,8 +439,20 @@ public class CApi {
     }
 
     /**
-     * Retrieves the raw off-heap memory address and length of a specific index tier.
-     * Useful for FPGA / GPU DMA direct memory transfers.
+     * <h3>Hardware Acceleration & DMA Direct Access Endpoint</h3>
+     * Retrieves the raw off-heap virtual memory address and length of a specific index tier.
+     *
+     * <p><b>FPGA/GPU Developers:</b> This endpoint allows custom hardware kernel logic to bypass the
+     * JVM execution completely. The returned address points directly to the off-heap {@code mmap}ed
+     * memory region. This memory layout is contiguous, read-only, cache-aligned, and safe to read
+     * concurrently via DMA.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target loaded index
+     * @param tierIdx index of the target tier (0-indexed) to inspect
+     * @param outAddress output pointer populated with the virtual memory address of the tier buffer
+     * @param outLength output pointer populated with the byte size of the tier buffer
+     * @return 0 on success, -1 if database not initialized, -2 if index not found, -3 if invalid tier index, or -6 if the index layout is unsupported
      */
     @CEntryPoint(name = "vdb_get_tier_address")
     public static int getTierAddress(IsolateThread thread, CCharPointer indexName, int tierIdx,
@@ -356,8 +485,15 @@ public class CApi {
     }
 
     /**
-     * Binarizes a single float vector using the index's Rademacher preconditioning + FWHT rotation.
-     * Output packed array must be pre-allocated (dimension / 64 longs).
+     * Binarizes a single float vector using the index's Rademacher signs preconditioning and
+     * Walsh-Hadamard Transform rotation block operators.
+     * The output packed array pointer must be pre-allocated by the caller to fit {@code ceil(dimension/64)} longs.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target index config (provides signs and dimensions)
+     * @param inVector C float array pointer storing the input vector of size {@code (dimension)}
+     * @param outPacked C long array pointer of size {@code (dimension/64)} populated with binarized bits
+     * @return 0 on success, -1 if database not initialized, -2 if index not found, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_transform_and_quantize")
     public static int transformAndQuantize(IsolateThread thread, CCharPointer indexName, CFloatPointer inVector, CLongPointer outPacked) {
@@ -390,6 +526,12 @@ public class CApi {
         }
     }
 
+    /**
+     * Closes the global database coordinator, freeing all resources and memory-mapped virtual allocations.
+     *
+     * @param thread the GraalVM isolate thread context
+     * @return 0 on success, or -4 on internal exception
+     */
     @CEntryPoint(name = "vdb_close")
     public static int closeDb(IsolateThread thread) {
         if (db != null) {
@@ -409,11 +551,13 @@ public class CApi {
     // =========================================================================
 
     /**
-     * Creates an in-memory delta buffer for the named index.
-     * The buffer captures real-time inserts without touching the immutable base index files.
+     * Creates an in-memory writable delta buffer for the named index.
+     * The delta buffer enables real-time vector inserts without rewriting the immutable base index files.
      *
-     * @param flushThreshold soft limit on live entries; use vdb_needs_flush() to check
-     * @return 0 on success, -1 if db not init, -2 if index not found, -4 on error
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the index to attach the buffer to
+     * @param flushThreshold soft limit on live entries. Use {@link #needsFlush} to query recommendation
+     * @return 0 on success, -1 if database not initialized, -2 if index not found, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_create_delta_buffer")
     public static int createDeltaBuffer(IsolateThread thread, CCharPointer indexName, int flushThreshold) {
@@ -431,9 +575,14 @@ public class CApi {
     }
 
     /**
-     * Inserts a single float vector into the delta buffer for the given index.
+     * Inserts a single float vector into the delta buffer.
+     * Inserts are performed off-heap in memory with low latency.
      *
-     * @return 0 on success, -1 if db not init, -2 if no delta buffer exists for the index, -4 on error
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the index to insert into
+     * @param id unique identifier of the vector record to insert
+     * @param vector C float array pointer storing the vector representation of size {@code (dimension)}
+     * @return 0 on success, -1 if database not initialized, -2 if no delta buffer is registered for this index, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_insert")
     public static int insert(IsolateThread thread, CCharPointer indexName, long id,
@@ -457,9 +606,13 @@ public class CApi {
     }
 
     /**
-     * Soft-deletes (tombstones) a record from the delta buffer.
+     * Soft-deletes a record from the delta buffer (tombstone).
+     * Any matching query results will filter this ID.
      *
-     * @return 1 if tombstoned, 0 if not found, -1 if db not init, -2 if no delta buffer
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target index
+     * @param id unique identifier of the vector record to delete
+     * @return 1 if successfully tombstoned, 0 if ID was not found, -1 if database not initialized, -2 if no delta buffer is registered
      */
     @CEntryPoint(name = "vdb_delete_from_delta")
     public static int deleteFromDelta(IsolateThread thread, CCharPointer indexName, long id) {
@@ -475,9 +628,11 @@ public class CApi {
     }
 
     /**
-     * Returns the number of live (non-tombstoned) entries in the delta buffer.
+     * Returns the total count of active (non-tombstoned) records in the delta buffer.
      *
-     * @return live entry count, or -1 if db not init, -2 if no delta buffer
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target index
+     * @return count of active records, -1 if database not initialized, or -2 if no delta buffer is registered
      */
     @CEntryPoint(name = "vdb_delta_size")
     public static long deltaSize(IsolateThread thread, CCharPointer indexName) {
@@ -494,9 +649,11 @@ public class CApi {
     }
 
     /**
-     * Returns 1 if the delta buffer has reached its flush threshold, 0 otherwise.
+     * Checks if the active record count in the delta buffer exceeds the flush threshold recommendation.
      *
-     * @return 1 if flush needed, 0 if not, -1 if db not init, -2 if no delta buffer
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target index
+     * @return 1 if flush is recommended, 0 if not recommended, -1 if database not initialized, or -2 if no delta buffer is registered
      */
     @CEntryPoint(name = "vdb_needs_flush")
     public static int needsFlush(IsolateThread thread, CCharPointer indexName) {
@@ -513,10 +670,16 @@ public class CApi {
     }
 
     /**
-     * Performs a unified search across the base index and the delta buffer (if present),
-     * merging and returning the top-K results by score.
+     * Performs a unified search querying both the memory-mapped base index and the delta buffer,
+     * merging and returning the combined top-K results.
      *
-     * @return 0 on success, -1 if db not init, -2 if index not found, -4 on error
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target loaded index
+     * @param query C float array pointer storing the query vector of size {@code (dimension)}
+     * @param k count of nearest neighbors to retrieve (top-K)
+     * @param outIds pre-allocated C long array pointer of size {@code (k)} to store output record IDs
+     * @param outDistances pre-allocated C int array pointer of size {@code (k)} to store output metric distances (scaled by 1,000,000)
+     * @return 0 on success, -1 if database not initialized, -2 if index not found, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_search_merged")
     public static int searchMerged(IsolateThread thread, CCharPointer indexName,
@@ -553,10 +716,13 @@ public class CApi {
     }
 
     /**
-     * Serializes the live entries of a delta buffer to a binary backup file.
-     * The backup can be restored with {@code vdb_restore_delta}.
+     * Serializes all active entries of a delta buffer to a binary backup file.
+     * Output format stores vector representations in raw float32 layout.
      *
-     * @return 0 on success, -1 if db not init, -2 if no delta buffer, -5 on I/O error
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the target loaded index
+     * @param path C string destination filepath for the backup file
+     * @return 0 on success, -1 if database not initialized, -2 if no delta buffer is registered, -5 on File I/O error, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_backup_delta")
     public static int backupDelta(IsolateThread thread, CCharPointer indexName, CCharPointer path) {
@@ -577,10 +743,13 @@ public class CApi {
     }
 
     /**
-     * Restores a delta buffer from a backup file, replacing any existing buffer for the index.
+     * Restores a delta buffer from a previously serialized binary file, replacing any active delta buffer.
      *
-     * @param flushThreshold flush threshold for the restored buffer
-     * @return 0 on success, -1 if db not init, -2 if index not found, -5 on I/O error
+     * @param thread the GraalVM isolate thread context
+     * @param indexName C string identifying the index
+     * @param path C string filepath of the backup file to restore
+     * @param flushThreshold soft limit on live entries for the restored buffer
+     * @return 0 on success, -1 if database not initialized, -2 if index not found, -5 on File I/O error, or -4 on internal exception
      */
     @CEntryPoint(name = "vdb_restore_delta")
     public static int restoreDelta(IsolateThread thread, CCharPointer indexName,
@@ -600,3 +769,4 @@ public class CApi {
         }
     }
 }
+

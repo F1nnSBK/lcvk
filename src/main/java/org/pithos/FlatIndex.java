@@ -27,7 +27,53 @@ import sun.misc.Unsafe;
 import java.lang.reflect.Field;
 
 /**
- * Dimension-agnostic high-performance multi-tier index.
+ * <h3>FlatIndex: Off-heap Memory-mapped Multi-Tier Vector Index</h3>
+ *
+ * <p>FlatIndex maps compiled index files directly off-heap into virtual memory
+ * segments, bypassing Java heap GC overhead and enabling zero-copy C FFI access.
+ *
+ * <p><h3>Binary File Layout Specifications (C/FPGA-friendly):</h3>
+ * <p>A compiled index consists of several files on disk sharing a base prefix:
+ * <ol>
+ *   <li><b>Base Config Header ({@code <prefix>})</b>:
+ *       64-byte aligned header storing core configuration parameters:
+ *       <ul>
+ *         <li>Offsets 0-3: Magic signature bytes {@code "PLAN"}</li>
+ *         <li>Offset 4: Planet ID (1 byte, 1=Moon, 2=Mars, etc.)</li>
+ *         <li>Offsets 5-12: Total record count N (64-bit int / long)</li>
+ *         <li>Offsets 13-20: Planet equatorial radius in meters (64-bit int / long)</li>
+ *         <li>Offsets 21-24: Original float vector dimension D (32-bit int)</li>
+ *         <li>Offsets 25-28: Number of Matryoshka tiers T (32-bit int)</li>
+ *         <li>Offsets 29-60: Array of tier dimension step boundaries (up to 8 tiers, 32-bit int each)</li>
+ *         <li>Offset 61: Quantization Mode (1 byte: 0 = 1-bit, 1 = 2-bit, 2 = float32 bypass)</li>
+ *       </ul>
+ *   </li>
+ *   <li><b>Record IDs Table ({@code <prefix>_ids.bin})</b>:
+ *       Contiguous binary array of {@code N} 64-bit integers (longs) storing resolved vector IDs.
+ *   </li>
+ *   <li><b>Metadata Table ({@code <prefix>_metadata.bin})</b>:
+ *       Contiguous binary array of {@code N} 64-bit integers storing record flags.
+ *       Bit 0 acts as a tombstone (1 = deleted, 0 = active).
+ *       Other bits store custom attributes for multi-criteria filtering.
+ *   </li>
+ *   <li><b>Tier Binary Tables ({@code <prefix>_tier_<k>.bin})</b>:
+ *       Bit-packed tables containing binarized or raw representations, partitioned by cumulative dimensions.
+ *       For 1-bit (qMode=0): packed sign bits (1 bit/dim), row-major.
+ *       For 2-bit (qMode=1): sign bits followed by active masks (2 bits/dim), row-major.
+ *       For Float-hybrid (qMode=2): raw rotated float32 values (4 bytes/dim), row-major.
+ *   </li>
+ *   <li><b>FP16 Sidecar File ({@code <prefix>_fp16.bin})</b>:
+ *       Optional contiguous binary array storing original (pre-rotation) vectors in IEEE 754 half-precision (2 bytes/dim).
+ *       Used for direct native off-heap Stage 2 exact L2 reranking.
+ *   </li>
+ * </ol>
+ *
+ * <p><h3>Search Execution Pipeline:</h3>
+ * <p>FlatIndex uses a lock-free multi-threaded pipeline coordinated by an LMAX Disruptor:
+ * <ol>
+ *   <li>Stage 1: Coarse Hamming distance scan over active tiers in parallel chunks to find top candidate lists.</li>
+ *   <li>Stage 2: Exact FP16 off-heap L2 reranking on candidate lists using the FP16 sidecar to resolve neighbors.</li>
+ * </ol>
  */
 public class FlatIndex implements Index {
 
