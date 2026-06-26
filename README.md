@@ -8,6 +8,25 @@ Pithos achieves its speed by collapsing abstraction boundaries between language 
 
 ---
 
+## Precompiled Native Libraries
+
+Precompiled native libraries are automatically published as GitHub Release assets after successful builds on the `main` branch and for version tags (`v*`).
+
+Download the latest release:
+
+https://github.com/F1nnSBK/lcvk/releases/latest
+
+Each release contains:
+
+- `libpithos-linux-x86_64.so` — Linux (x86_64)
+- `libpithos-macos-aarch64.dylib` — macOS (Apple Silicon)
+- `pithos.h` — C API header
+- `graal_isolate.h` — GraalVM Native Image header
+
+These binaries can be used directly without installing GraalVM or building the project from source.
+
+---
+
 ## Architectural Principles & Core Innovations
 
 Pithos is built on the premise that the database is a physical extension of the embedding model itself. Both share a mathematical contract established during model training:
@@ -305,24 +324,6 @@ Pithos is specifically designed for hybrid CPU-FPGA/GPU acceleration workflows, 
 ![Workload Reduction vs. Target Recall](assets/candidate_tradeoff.png)
 <!-- BENCHMARK_METRICS_END -->
 
----
-
-## Precompiled Native Libraries
-
-Precompiled native libraries are automatically published as GitHub Release assets after successful builds on the `main` branch and for version tags (`v*`).
-
-Download the latest release:
-
-https://github.com/F1nnSBK/lcvk/releases/latest
-
-Each release contains:
-
-- `libpithos-linux-x86_64.so` — Linux (x86_64)
-- `libpithos-macos-aarch64.dylib` — macOS (Apple Silicon)
-- `pithos.h` — C API header
-- `graal_isolate.h` — GraalVM Native Image header
-
-These binaries can be used directly without installing GraalVM or building the project from source.
 
 ---
 
