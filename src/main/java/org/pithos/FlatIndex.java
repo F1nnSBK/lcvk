@@ -23,8 +23,7 @@ import com.lmax.disruptor.WorkHandler;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 
-import sun.misc.Unsafe;
-import java.lang.reflect.Field;
+
 
 /**
  * <h3>FlatIndex: Off-heap Memory-mapped Multi-Tier Vector Index</h3>
@@ -77,16 +76,7 @@ import java.lang.reflect.Field;
  */
 public class FlatIndex implements Index {
 
-    private static final Unsafe UNSAFE;
-    static {
-        try {
-            Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
-            theUnsafe.setAccessible(true);
-            UNSAFE = (Unsafe) theUnsafe.get(null);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to initialize sun.misc.Unsafe", e);
-        }
-    }
+
 
     private final MemorySegment baseSegment;
     private final MemorySegment idsSegment;
@@ -481,8 +471,6 @@ public class FlatIndex implements Index {
             zQueries[q] = transformOperator.preconditionAndRotate(queries[q]);
         }
 
-        long idsAddr = idsSegment.address();
-
         // Stage 2: Asymmetric Reranking (parallelized over queries to minimize latency)
         List<SearchResult>[] finalResults = new List[numQueries];
         IntStream.range(0, numQueries).forEach(q -> {
@@ -533,7 +521,7 @@ public class FlatIndex implements Index {
                 int limit = Math.min(k, candidates.size());
                 for (int i = 0; i < limit; i++) {
                     long rowIdx = candidates.get(i);
-                    long recordId = UNSAFE.getLong(idsAddr + (rowIdx * 8));
+                    long recordId = idsSegment.get(ValueLayout.JAVA_LONG, rowIdx * 8);
                     queryResults.add(new SearchResult(recordId, 0));
                 }
                 finalResults[q] = queryResults;
@@ -575,7 +563,7 @@ public class FlatIndex implements Index {
             int limit = Math.min(k, reranked.size());
             for (int i = 0; i < limit; i++) {
                 RerankedCandidate c = reranked.get(i);
-                long recordId = UNSAFE.getLong(idsAddr + (c.rowIdx * 8));
+                long recordId = idsSegment.get(ValueLayout.JAVA_LONG, c.rowIdx * 8);
                 queryResults.add(new SearchResult(recordId, (int) (c.distance * 1000000.0)));
             }
             finalResults[q] = queryResults;
@@ -586,7 +574,6 @@ public class FlatIndex implements Index {
 
     private void executeKnnRange(long startIdx, long endIdx, float[][] queries, int k, long[][] myIds,
             int[][] myDists) {
-        long metadataAddr = metadataSegment.address();
         int numQueries = queries.length;
 
         // Binarize all queries once
@@ -613,11 +600,6 @@ public class FlatIndex implements Index {
             }
         }
 
-        long[] tierAddrs = new long[numTiers];
-        for (int i = 0; i < numTiers; i++) {
-            tierAddrs[i] = tierSegments[i].address();
-        }
-
         // --- SIMD Float-L2 dispatch for D <= SIMD_FLOAT_DIM_THRESHOLD (1-bit mode only) ---
         if (dimension <= SIMD_FLOAT_DIM_THRESHOLD && qMode == 0) {
             // For tiny dimensions the Hamming approximation introduces large relative error.
@@ -626,15 +608,14 @@ public class FlatIndex implements Index {
             for (int q = 0; q < numQueries; q++) {
                 rotQueries[q] = transformOperator.preconditionAndRotate(queries[q]);
             }
-            long tier0Addr = tierAddrs[0];
             int numLongs0 = tierLongs[0];
             float[] dbFloat = new float[dimension];
             for (long i = startIdx; i < endIdx; i++) {
-                long metaVal = UNSAFE.getLong(metadataAddr + (i * 8));
+                long metaVal = metadataSegment.get(ValueLayout.JAVA_LONG, i * 8);
                 if ((metaVal & 1L) == 1L) continue;
                 long baseOff = i * (numLongs0 * 8L);
                 for (int d = 0; d < dimension; d++) {
-                    long word = UNSAFE.getLong(tier0Addr + baseOff + (d / 64) * 8);
+                    long word = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOff + (d / 64) * 8);
                     dbFloat[d] = ((word >>> (d % 64)) & 1L) != 0L ? 1.0f : -1.0f;
                 }
                 for (int q = 0; q < numQueries; q++) {
@@ -669,16 +650,16 @@ public class FlatIndex implements Index {
             float[] dbFloat = new float[dimension];
             int dimOffset = 0;
             for (long i = startIdx; i < endIdx; i++) {
-                long metaVal = UNSAFE.getLong(metadataAddr + (i * 8));
+                long metaVal = metadataSegment.get(ValueLayout.JAVA_LONG, i * 8);
                 if ((metaVal & 1L) == 1L) continue;
                 // Reconstruct full float vector from all tiers
                 dimOffset = 0;
                 for (int tierIdx = 0; tierIdx < numTiers; tierIdx++) {
                     int startDim = tierIdx == 0 ? 0 : tiers[tierIdx - 1];
                     int width = tiers[tierIdx] - startDim;
-                    long tAddr = tierAddrs[tierIdx] + i * (width * 4L);
+                    long baseOffset = i * (width * 4L);
                     for (int d = 0; d < width; d++) {
-                        dbFloat[dimOffset + d] = Float.intBitsToFloat(UNSAFE.getInt(tAddr + d * 4L));
+                        dbFloat[dimOffset + d] = tierSegments[tierIdx].get(ValueLayout.JAVA_FLOAT, baseOffset + d * 4L);
                     }
                     dimOffset += width;
                 }
@@ -709,7 +690,7 @@ public class FlatIndex implements Index {
 
         for (long i = startIdx; i < endIdx; i++) {
             // Gate 1: Tombstone & Attribute Mask
-            long metaVal = UNSAFE.getLong(metadataAddr + (i * 8));
+            long metaVal = metadataSegment.get(ValueLayout.JAVA_LONG, i * 8);
             if ((metaVal & 1L) == 1L) {
                 continue; // Tombstone active -> Deleted
             }
@@ -718,17 +699,15 @@ public class FlatIndex implements Index {
             if (qMode == 1) { // 2-bit mode
                 int numLongs0 = tierLongs[0];
                 long baseOffset0 = i * (numLongs0 * 16L);
-                long tAddr0 = tierAddrs[0] + baseOffset0;
                 for (int l = 0; l < numLongs0; l++) {
-                    dbWords[l] = UNSAFE.getLong(tAddr0 + (l * 8));
-                    dbMasks[l] = UNSAFE.getLong(tAddr0 + (numLongs0 * 8L) + (l * 8));
+                    dbWords[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (l * 8));
+                    dbMasks[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (numLongs0 * 8L) + (l * 8));
                 }
             } else { // 1-bit mode
                 int numLongs0 = tierLongs[0];
                 long baseOffset0 = i * (numLongs0 * 8L);
-                long tAddr0 = tierAddrs[0] + baseOffset0;
                 for (int l = 0; l < numLongs0; l++) {
-                    dbWords[l] = UNSAFE.getLong(tAddr0 + (l * 8));
+                    dbWords[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (l * 8));
                 }
             }
 
@@ -748,16 +727,14 @@ public class FlatIndex implements Index {
                         int offset = tierOffsets[tierIdx];
                         if (qMode == 1) {
                             long baseOffset = i * (numLongs * 16L);
-                            long tAddr = tierAddrs[tierIdx] + baseOffset;
                             for (int l = 0; l < numLongs; l++) {
-                                dbWords[offset + l] = UNSAFE.getLong(tAddr + (l * 8));
-                                dbMasks[offset + l] = UNSAFE.getLong(tAddr + (numLongs * 8L) + (l * 8));
+                                dbWords[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
+                                dbMasks[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (numLongs * 8L) + (l * 8));
                             }
                         } else {
                             long baseOffset = i * (numLongs * 8L);
-                            long tAddr = tierAddrs[tierIdx] + baseOffset;
                             for (int l = 0; l < numLongs; l++) {
-                                dbWords[offset + l] = UNSAFE.getLong(tAddr + (l * 8));
+                                dbWords[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
                             }
                         }
                         loadedTiers |= (1 << tierIdx);
@@ -816,15 +793,14 @@ public class FlatIndex implements Index {
             for (int tierIdx = 0; tierIdx < numTiers; tierIdx++) {
                 int numLongs = tierLongs[tierIdx];
                 long baseOffset = rowIdx * (numLongs * 16L);
-                long tAddr = tierSegments[tierIdx].address() + baseOffset;
                 
                 for (int l = 0; l < numLongs; l++) {
-                    long mask = UNSAFE.getLong(tAddr + (numLongs * 8L) + (l * 8));
+                    long mask = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (numLongs * 8L) + (l * 8));
                     if (mask == 0L) {
                         continue;
                     }
                     totalMaskPopcount += Long.bitCount(mask);
-                    long word = UNSAFE.getLong(tAddr + (l * 8));
+                    long word = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
                     
                     int bitOffset = (queryOffsetLongs + l) * 64;
                     int limit = Math.min(64, query.length - bitOffset);
@@ -846,8 +822,7 @@ public class FlatIndex implements Index {
         } else { // 1-bit mode
             double sumPositive = 0.0;
             // Tier 0
-            long t0Addr = tierSegments[0].address() + (rowIdx * 8);
-            long word0 = UNSAFE.getLong(t0Addr);
+            long word0 = tierSegments[0].get(ValueLayout.JAVA_LONG, rowIdx * 8);
             int limit0 = Math.min(64, query.length);
             long limitMask0 = limit0 == 64 ? -1L : (1L << limit0) - 1L;
             long active0 = word0 & limitMask0;
@@ -861,10 +836,9 @@ public class FlatIndex implements Index {
             for (int tierIdx = 1; tierIdx < numTiers; tierIdx++) {
                 int numLongs = tierLongs[tierIdx];
                 long baseOffset = rowIdx * (numLongs * 8L);
-                long tAddr = tierSegments[tierIdx].address() + baseOffset;
                 
                 for (int l = 0; l < numLongs; l++) {
-                    long word = UNSAFE.getLong(tAddr + (l * 8));
+                    long word = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
                     int bitOffset = (queryOffsetLongs + l) * 64;
                     int limit = Math.min(64, query.length - bitOffset);
                     long limitMask = limit == 64 ? -1L : (1L << limit) - 1L;
@@ -891,11 +865,10 @@ public class FlatIndex implements Index {
      * @return exact L2 squared distance (float precision)
      */
     private double computeExactL2FP16(float[] rawQuery, long rowIdx) {
-        long fp16Addr = fp16Segment.address();
         long rowOffset = rowIdx * dimension * 2L;
         double sum = 0.0;
         for (int d = 0; d < dimension; d++) {
-            short fp16 = UNSAFE.getShort(fp16Addr + rowOffset + d * 2L);
+            short fp16 = fp16Segment.get(ValueLayout.JAVA_SHORT, rowOffset + d * 2L);
             float dbVal = Float.float16ToFloat(fp16);
             double diff = rawQuery[d] - dbVal;
             sum += diff * diff;
@@ -942,7 +915,6 @@ public class FlatIndex implements Index {
             throw new RuntimeException("Voting execution was interrupted", e);
         }
 
-        long maskAddr = votingMask.address();
         int numThreads = Runtime.getRuntime().availableProcessors();
         long recordsPerThread = numRecords / numThreads;
         if (recordsPerThread == 0) {
@@ -952,11 +924,6 @@ public class FlatIndex implements Index {
         final int activeThreads = numThreads;
         final long finalRecordsPerThread = recordsPerThread;
 
-        long[] localMaskAddrs = new long[numWorkers];
-        for (int w = 0; w < numWorkers; w++) {
-            localMaskAddrs[w] = threadLocalMasks[w].address();
-        }
-
         return IntStream.range(0, activeThreads).parallel().mapToLong(t -> {
             long startIdx = t * finalRecordsPerThread;
             long endIdx = (t == activeThreads - 1) ? numRecords : (t + 1) * finalRecordsPerThread;
@@ -964,9 +931,9 @@ public class FlatIndex implements Index {
             for (long i = startIdx; i < endIdx; i++) {
                 byte mergedVal = 0;
                 for (int w = 0; w < numWorkers; w++) {
-                    mergedVal |= UNSAFE.getByte(localMaskAddrs[w] + i);
+                    mergedVal |= threadLocalMasks[w].get(ValueLayout.JAVA_BYTE, i);
                 }
-                UNSAFE.putByte(maskAddr + i, mergedVal);
+                votingMask.set(ValueLayout.JAVA_BYTE, i, mergedVal);
                 // Check if resonance threshold is reached (e.g. >= 5 votes)
                 if (Integer.bitCount(mergedVal & 0xFF) >= 5) {
                     resonantCount++;
@@ -978,8 +945,6 @@ public class FlatIndex implements Index {
 
     private void executeVotingRange(long startIdx, long endIdx, float[][] queries, int[] families, int[] thresholds,
             MemorySegment localMask) {
-        long metadataAddr = metadataSegment.address();
-        long localMaskAddr = localMask.address();
         int numQueries = queries.length;
 
         // Binarize all queries once
@@ -1006,11 +971,6 @@ public class FlatIndex implements Index {
             }
         }
 
-        long[] tierAddrs = new long[numTiers];
-        for (int i = 0; i < numTiers; i++) {
-            tierAddrs[i] = tierSegments[i].address();
-        }
-
 
 
         int totalLongs = dimension / 64;
@@ -1021,7 +981,7 @@ public class FlatIndex implements Index {
 
         for (long i = startIdx; i < endIdx; i++) {
             // Gate 1: Tombstone & Attribute Mask
-            long metaVal = UNSAFE.getLong(metadataAddr + (i * 8));
+            long metaVal = metadataSegment.get(ValueLayout.JAVA_LONG, i * 8);
             if ((metaVal & 1L) == 1L) {
                 continue; // Tombstone active
             }
@@ -1031,31 +991,29 @@ public class FlatIndex implements Index {
                 // Gate 2: QEG
                 int numLongs0 = tierLongs[0];
                 long baseOffset0 = i * (numLongs0 * 16L);
-                long tAddr0 = tierAddrs[0] + baseOffset0;
-                long t0Sign = UNSAFE.getLong(tAddr0);
-                long t0Mask = UNSAFE.getLong(tAddr0 + (numLongs0 * 8L));
+                long t0Sign = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0);
+                long t0Mask = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (numLongs0 * 8L));
                 if ((t0Mask & (1L << 63)) == 0L || (t0Sign & (1L << 63)) == 0L) {
                     continue; // Early exit
                 }
                 dbWords[0] = t0Sign;
                 dbMasks[0] = t0Mask;
                 for (int l = 1; l < numLongs0; l++) {
-                    dbWords[l] = UNSAFE.getLong(tAddr0 + (l * 8));
-                    dbMasks[l] = UNSAFE.getLong(tAddr0 + (numLongs0 * 8L) + (l * 8));
+                    dbWords[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (l * 8));
+                    dbMasks[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (numLongs0 * 8L) + (l * 8));
                 }
                 loadedTiers = 1;
             } else { // 1-bit mode
                 // Gate 2: QEG
                 int numLongs0 = tierLongs[0];
                 long baseOffset0 = i * (numLongs0 * 8L);
-                long tAddr0 = tierAddrs[0] + baseOffset0;
-                long t0Val = UNSAFE.getLong(tAddr0);
+                long t0Val = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0);
                 if ((t0Val & (1L << 63)) == 0L) {
                     continue; // Early exit
                 }
                 dbWords[0] = t0Val;
                 for (int l = 1; l < numLongs0; l++) {
-                    dbWords[l] = UNSAFE.getLong(tAddr0 + (l * 8));
+                    dbWords[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (l * 8));
                 }
                 loadedTiers = 1;
             }
@@ -1077,16 +1035,14 @@ public class FlatIndex implements Index {
                 if ((loadedTiers & (1 << tierIdx)) == 0) {
                     if (qMode == 1) {
                         long baseOffset = i * (numLongs * 16L);
-                        long tAddr = tierAddrs[tierIdx] + baseOffset;
                         for (int l = 0; l < numLongs; l++) {
-                            dbWords[offset + l] = UNSAFE.getLong(tAddr + (l * 8));
-                            dbMasks[offset + l] = UNSAFE.getLong(tAddr + (numLongs * 8L) + (l * 8));
+                            dbWords[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
+                            dbMasks[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (numLongs * 8L) + (l * 8));
                         }
                     } else {
                         long baseOffset = i * (numLongs * 8L);
-                        long tAddr = tierAddrs[tierIdx] + baseOffset;
                         for (int l = 0; l < numLongs; l++) {
-                            dbWords[offset + l] = UNSAFE.getLong(tAddr + (l * 8));
+                            dbWords[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
                         }
                     }
                     loadedTiers |= (1 << tierIdx);
@@ -1131,7 +1087,7 @@ public class FlatIndex implements Index {
                     }
                 }
             }
-            UNSAFE.putByte(localMaskAddr + i, maskVal);
+            localMask.set(ValueLayout.JAVA_BYTE, i, maskVal);
         }
     }
 
