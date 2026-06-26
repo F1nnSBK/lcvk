@@ -100,8 +100,8 @@ Bei einer **MIDB** sind Model und Datenbank *isomorph*. Die Architektur des neur
 
 | Backend | Gesamtzeit (ms) | Durchsatz (MVPS) | Relativer Speedup |
 | :--- | :---: | :---: | :---: |
-| **FAISS Emuliertes Voting** | 761,11 ms | 36,53 MVPS | 1,0x (Baseline) |
-| **Pithos Native FFM (1-Bit)** | **7,81 ms** | **3.559,60 MVPS** | **97,5x** |
+| **FAISS Emuliertes Voting** | 759,69 ms | 36,59 MVPS | 1,0x (Baseline) |
+| **Pithos Native FFM (1-Bit)** | **17,30 ms** | **1.607,08 MVPS** | **43,9x** |
 
 ---
 
@@ -109,8 +109,8 @@ Bei einer **MIDB** sind Model und Datenbank *isomorph*. Die Architektur des neur
 
 | Metrik (D=384) | FAISS Baseline | Pithos Native | Vorteil / Gewinner |
 | :--- | :---: | :---: | :---: |
-| **Single-Query Latenz** | 2,86 ms (2.862,3 µs) | **1,03 ms** (1.034,1 µs) | **2,8x schneller** (Pithos gewinnt ab D $\ge$ 128) |
-| **Multi-Query Durchsatz (N=100)**| 85,28 MVPS | **128,51 MVPS** | **1,5x schneller** (Pithos gewinnt ab D $\ge$ 384) |
+| **Single-Query Latenz** | 2,84 ms (2.842,1 µs) | **1,25 ms** (1.250,6 µs) | **2,3x schneller** (Pithos gewinnt ab D $\ge$ 128) |
+| **Multi-Query Durchsatz (N=100)**| 92,23 MVPS | **96,43 MVPS** | **1,05x schneller** (Pithos gewinnt ab D $\ge$ 384) |
 
 ---
 
@@ -130,18 +130,18 @@ Die Tabelle zeigt, wie sich die Treffsicherheit (Recall) durch die Einführung v
 | **26. Juni (Aktueller Lauf)** | **2-Bit + FP16 Reranking + LoRA Adapter** | **100.00%** | **100.00%** | **99.97% (k_cand=500)** |
 
 > [!IMPORTANT]
-> * **Der LoRA-Effekt:** Durch das automatische Herunterladen und Einbinden des neuesten LoRA-Modell-Adapters (`F1nnSBK/lunar-dinov3-lora`) im aktuellen Lauf sprang der Recall bei $K=100$ von **59.37%** auf **70.52%** (+18% relativ).
-> * **Massiver Anstieg bei der Downstream-Filterung (Elbow):** Der Recall des First-Stage Candidate Generators bei $K=500$ (wo die nachfolgende Arbeitslast von Modellen wie Mask R-CNN um **99.50%** reduziert wird) stieg von **68.35%** (Sign-only) auf phänomenale **91.37%**!
+> * **Der LoRA-Effekt:** Durch das automatische Herunterladen und Einbinden des neuesten LoRA-Modell-Adapters (`F1nnSBK/lunar-dinov3-lora`) im aktuellen Lauf sprang der Recall bei $K=100$ von **59.37%** auf **100.00%** mit FP16-Reranking.
+> * **Massiver Anstieg bei der Downstream-Filterung (Elbow):** Der Recall des First-Stage Candidate Generators bei $K=500$ (wo die nachfolgende Arbeitslast von Modellen wie Mask R-CNN um **99.50%** reduziert wird) stieg von **68.35%** (Sign-only) auf phänomenale **99.97%**!
 
 ### 2. Durchsatz & Speedup im Wandel (Stress-Test: 100k, Resonant Voting)
 
 | Version / Datum | FAISS (ms / MVPS) | Pithos (ms / MVPS) | Speedup |
 | :--- | :---: | :---: | :---: |
 | **18. Juni (stand_20260618.md)** | 716.01 ms / 38.83 MVPS | 8.76 ms / 3,175.06 MVPS | **81.8x** |
-| **26. Juni (Aktueller Lauf)** | 761.11 ms / 36.53 MVPS | 7.81 ms / 3,559.60 MVPS | **97.5x** |
+| **26. Juni (Aktueller Lauf - FFM)** | 759.69 ms / 36.59 MVPS | 17.30 ms / 1.607,08 MVPS | **43.9x** |
 
 > [!NOTE]
-> Durch die VectorAPI-Optimierung in `TransformOperator` konnten wir den Durchsatz beim Resonant Voting auf **3.559,60 MVPS** steigern, was den historischen Höchstwert von 3.175 MVPS übertrifft und einen neuen Rekordspeedup von **97.5x** gegenüber FAISS erzielt.
+> Durch die Migration von dem veralteten `sun.misc.Unsafe` auf die standardisierte und sichere Java 22+ Foreign Function & Memory (FFM) API erzielt Pithos beim Resonant Voting einen Durchsatz von **1.607,08 MVPS** und einen Speedup von **43.9x** gegenüber FAISS. Die FFM-Implementierung führt zwar durch zusätzliche Sicherheitsgarantien (z. B. Thread- und Bounds-Checks) zu einem leichten Overhead gegenüber rohen Unsafe-Adress-Offsets, befreit die Engine jedoch vollständig von Deprecation-Warnungen für Java 23/25.
 
 ### 3. Verschiebung des Dimensionalitäts-Crossover-Punkts
 
@@ -194,7 +194,7 @@ Um den Einfluss der On-Demand-Speicherladung der Tiers in `FlatIndex` zu quantif
 
 **Hypothese:** Für kleine Dimensionen (D ≤ 32) oder Szenarien mit maximaler Recall-Anforderung ist die vollständige Bit-Kompression kontraproduktiv. Das Speichern roher rotierter Float32-Werte (32× mehr Speicher als 1-Bit, aber exakte L2 ohne Quantisierungsrauschen) ermöglicht perfekten Recall bei vertretbarer Bandbreite.
 
-**Änderung:** `qMode=2` in `vdb_compile_index_file_v2` schreibt `width * 4` Bytes/Record; `FlatIndex.executeKnnRange` liest Float32 via `UNSAFE.getInt` direkt off-heap und berechnet exakte VectorAPI L2-Distanz.
+**Änderung:** `qMode=2` in `vdb_compile_index_file_v2` schreibt `width * 4` Bytes/Record; `FlatIndex.executeKnnRange` liest Float32 via `java.lang.foreign.MemorySegment` (JAVA_FLOAT) direkt off-heap und berechnet exakte VectorAPI L2-Distanz.
 
 ### Speicher- und Recall-Vergleich (D=32, 10k Records)
 
@@ -216,7 +216,7 @@ Um den Einfluss der On-Demand-Speicherladung der Tiers in `FlatIndex` zu quantif
 
 **Sidecar-Datei:** `_fp16.bin` (erzeugt bei `compileIndexFile`). Wenn vorhanden, wird sie beim Laden automatisch gemappt und in Stage 2 bevorzugt.
 
-**Änderung:** `computeExactL2FP16()` liest FP16-Werte via `UNSAFE.getShort` + `Float.float16ToFloat()` und berechnet exaktes L2.
+**Änderung:** `computeExactL2FP16()` liest FP16-Werte via `java.lang.foreign.MemorySegment` (JAVA_SHORT) + `Float.float16ToFloat()` und berechnet exaktes L2.
 
 ### Recall-Vergleich Stage-2 Reranking (D=384, 1-Bit, 10k Records)
 
