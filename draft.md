@@ -58,6 +58,36 @@ Bei einer **MIDB** sind Model und Datenbank *isomorph*. Die Architektur des neur
 
 ---
 
+## Pithos Engine: Implementierte Fähigkeiten (Capabilities)
+
+Pithos ist als vollwertige, native Vektordatenbank-Engine implementiert und verfügt über folgende Fähigkeiten:
+
+1. **Multi-Tier Matryoshka-Kaskadierung (MRL)**:
+   - Unterteilung der Vektordimensionen in kumulative, spektral geordnete Energie-Tiers.
+   - Dynamische Kaskaden-Steuerung (Early-Exit) im Hamming-Space basierend auf einem wählbaren Varianz-Energie-Budget ($\tau$).
+2. **Flexible Quantisierungs-Engine (3 Modi)**:
+   - **QMode 0 (1-Bit Sign-only)**: Maximale Kompression ($+1$ / $-1$), verpackt in contiguous `long` Arrays.
+   - **QMode 1 (2-Bit Ternary)**: Codiert Sign-Bit und Rauschmaske ($+1$, $0$, $-1$), um dimensionale Artefakte/Rauschen auszufiltern.
+   - **QMode 2 (Float-Hybrid Bypass)**: Speichert raw Float32 für kleine Dimensionen ($D \le 32$) zur Vermeidung von Quantisierungsverlusten bei maximalem Recall.
+3. **Zweistufiges In-Engine Reranking (FP16 Sidecar)**:
+   - Paralleles Mappen der originalen unkomprimierten Vektoren als IEEE 754 Half-Precision (FP16) Sidecar-Datei (`_fp16.bin`).
+   - Stage 1 filtert Hamming-Kandidaten, Stage 2 führt ein exaktes L2-Reranking off-heap durch. Steigert den Recall auf bis zu **100,00%**.
+4. **Log-Structured Merge (LSM) Delta-Buffer**:
+   - In-Memory Write-Buffer (`DeltaBuffer`) für Echtzeit-Einfügungen (Insert-Latenz **< 0,02 ms**).
+   - Unterstützung für Echtzeit-Tombstones (Soft-Deletes).
+   - Unified Search (`vdb_search_merged`) sucht parallel in Base-Index und Delta-Buffer mit automatischem Deduplizieren.
+   - Persistente Sicherung & Wiederherstellung mittels binärer Backup/Restore-Routinen (`vdb_backup_delta` / `vdb_restore_delta`).
+5. **Hardware- & Low-Level-Optimierungen**:
+   - **Java Vector API SIMD**: Hardware-beschleunigte L2-Distanzberechnungen für QMode 2 und FP16-Reranking mittels CPU-Vector-Lanes.
+   - **LMAX Disruptor Pipeline**: Lock-freie, multi-threaded parallele Scan-Execution zur Maximierung der L3-Cache-Hits und Speicherbandbreite.
+   - **FPGA/GPU DMA-Direct Access**: FFM-Exposition roher Off-Heap-Speicheradressen (`vdb_get_tier_address`) zur Umgehung der CPU für Direct-Memory-Access-Controller (DMA).
+6. **Sichere Foreign Function & Memory (FFM) API**:
+   - Kompletter Verzicht auf instabile `sun.misc.Unsafe`-Pointer. Nutzung der stabilen Java 22+ FFM API (`MemorySegment`) für absolute Crash-Sicherheit bei nativem Tempo.
+7. **Natives GraalVM AOT Compilation Interface**:
+   - Kompilierung als C-kompatibles Shared Object (`libpithos.dylib` / `.so`) und Header-Dateien (`pithos.h` / `graal_isolate.h`). Bietet Zero-Overhead FFI-Bindungen für Python, C/C++ oder Rust.
+
+---
+
 ## Fakten & Zahlen (Cheat Sheet für Pithos)
 
 ### 1. System- & Datensatz-Konfiguration
