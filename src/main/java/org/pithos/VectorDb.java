@@ -222,5 +222,26 @@ public class VectorDb {
                 }
             }
         }
+
+        // 5. Write FP16 sidecar: stores original (pre-rotation) vectors in IEEE 754 half-precision.
+        //    2 bytes per dimension, row-major layout. Used for high-recall in-engine Stage 2 reranking.
+        Path fp16Path = Path.of(basePath + "_fp16.bin");
+        try (FileChannel channel = FileChannel.open(fp16Path,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.WRITE,
+                StandardOpenOption.READ,
+                StandardOpenOption.TRUNCATE_EXISTING)) {
+            long fp16Bytes = totalRecords * dimension * 2L;
+            MemorySegment fp16Mapped = channel.map(FileChannel.MapMode.READ_WRITE, 0, fp16Bytes, Arena.global());
+            for (int i = 0; i < totalRecords; i++) {
+                float[] vec = records.get(i).vector();
+                long rowOffset = (long) i * dimension * 2;
+                for (int d = 0; d < dimension; d++) {
+                    short fp16 = Float.floatToFloat16(vec[d]);
+                    fp16Mapped.set(ValueLayout.JAVA_SHORT_UNALIGNED, rowOffset + d * 2L, fp16);
+                }
+            }
+            fp16Mapped.force();
+        }
     }
 }

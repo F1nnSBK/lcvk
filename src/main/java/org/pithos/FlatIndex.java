@@ -46,6 +46,7 @@ public class FlatIndex implements Index {
     private final MemorySegment idsSegment;
     private final MemorySegment[] tierSegments;
     private final MemorySegment metadataSegment;
+    private final MemorySegment fp16Segment; // Optional FP16 sidecar; null if not present
 
     private final byte planetId;
     private final long planetRadius;
@@ -150,13 +151,14 @@ public class FlatIndex implements Index {
     }
 
     public FlatIndex(MemorySegment baseSegment, MemorySegment idsSegment, MemorySegment[] tierSegments,
-            MemorySegment metadataSegment,
+            MemorySegment metadataSegment, MemorySegment fp16Segment,
             byte planetId, long planetRadius, int dimension, int numTiers, int[] tiers, long size,
             float[] cumulativeEnergy, int qMode) {
         this.baseSegment = baseSegment;
         this.idsSegment = idsSegment;
         this.tierSegments = tierSegments;
         this.metadataSegment = metadataSegment;
+        this.fp16Segment = fp16Segment;
         this.planetId = planetId;
         this.planetRadius = planetRadius;
         this.dimension = dimension;
@@ -341,7 +343,17 @@ public class FlatIndex implements Index {
             }
         }
 
-        return new FlatIndex(mappedBase, idsSegment, tierSegments, metadataSegment,
+        // 6. Optionally map FP16 sidecar (basePath + "_fp16.bin")
+        MemorySegment fp16Segment = null;
+        Path fp16Path = Path.of(basePath + "_fp16.bin");
+        if (fp16Path.toFile().exists()) {
+            try (FileChannel channel = FileChannel.open(fp16Path, StandardOpenOption.READ)) {
+                fp16Segment = channel.map(FileChannel.MapMode.READ_ONLY, 0,
+                        totalRecords * dimension * 2L, Arena.global());
+            }
+        }
+
+        return new FlatIndex(mappedBase, idsSegment, tierSegments, metadataSegment, fp16Segment,
                 planetId, planetRadius, dimension, numTiers, tiers, totalRecords, cumulativeEnergy, qMode);
     }
 
@@ -492,10 +504,21 @@ public class FlatIndex implements Index {
                 }
             }
 
+            // Choose reranking strategy:
+            //  - If FP16 sidecar is present: use exact L2 on original (pre-rotation) vectors → highest recall
+            //  - Otherwise: use asymmetric binary/ternary L2 estimator (cheaper, slightly lower recall)
             List<RerankedCandidate> reranked = new ArrayList<>();
-            for (long rowIdx : candidates) {
-                double dist = computeAsymmetricL2DistanceOffHeap(zQueries[q], queryL2Norm, querySum, rowIdx);
-                reranked.add(new RerankedCandidate(rowIdx, dist));
+            if (fp16Segment != null) {
+                float[] rawQuery = queries[q]; // raw (pre-rotation) query
+                for (long rowIdx : candidates) {
+                    double dist = computeExactL2FP16(rawQuery, rowIdx);
+                    reranked.add(new RerankedCandidate(rowIdx, dist));
+                }
+            } else {
+                for (long rowIdx : candidates) {
+                    double dist = computeAsymmetricL2DistanceOffHeap(zQueries[q], queryL2Norm, querySum, rowIdx);
+                    reranked.add(new RerankedCandidate(rowIdx, dist));
+                }
             }
 
             // Sort by distance (ascending)
@@ -810,6 +833,28 @@ public class FlatIndex implements Index {
             }
             return query.length + queryL2Norm + 2.0 * querySum - 4.0 * sumPositive;
         }
+    }
+
+    /**
+     * Computes exact L2 distance between a raw (pre-rotation) query and the stored FP16 vector at rowIdx.
+     * Requires fp16Segment to be non-null.
+     * The query must be in the original (non-rotated) float space.
+     *
+     * @param rawQuery raw float query vector (pre-rotation)
+     * @param rowIdx   row index in the FP16 sidecar
+     * @return exact L2 squared distance (float precision)
+     */
+    private double computeExactL2FP16(float[] rawQuery, long rowIdx) {
+        long fp16Addr = fp16Segment.address();
+        long rowOffset = rowIdx * dimension * 2L;
+        double sum = 0.0;
+        for (int d = 0; d < dimension; d++) {
+            short fp16 = UNSAFE.getShort(fp16Addr + rowOffset + d * 2L);
+            float dbVal = Float.float16ToFloat(fp16);
+            double diff = rawQuery[d] - dbVal;
+            sum += diff * diff;
+        }
+        return sum;
     }
 
     @Override
