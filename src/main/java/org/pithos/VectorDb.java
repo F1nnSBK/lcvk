@@ -71,7 +71,8 @@ public class VectorDb {
 
     /**
      * Creates an in-memory delta buffer for the given index.
-     * The buffer enables real-time inserts without modifying the immutable base index.
+     * The buffer enables real-time inserts without modifying the immutable base
+     * index.
      *
      * @param indexName      name of the base index
      * @param flushThreshold soft limit on live entries before flush is recommended
@@ -80,7 +81,8 @@ public class VectorDb {
      */
     public DeltaBuffer createDeltaBuffer(String indexName, int flushThreshold) {
         Index index = indices.get(indexName);
-        if (index == null) throw new IllegalArgumentException("Unknown index: " + indexName);
+        if (index == null)
+            throw new IllegalArgumentException("Unknown index: " + indexName);
         DeltaBuffer buf = new DeltaBuffer(index.getDimension(), flushThreshold);
         deltaBuffers.put(indexName, buf);
         return buf;
@@ -98,7 +100,8 @@ public class VectorDb {
      */
     public boolean insertIntoDelta(String indexName, long id, float[] vector) {
         DeltaBuffer buf = deltaBuffers.get(indexName);
-        if (buf == null) return false;
+        if (buf == null)
+            return false;
         buf.insert(id, vector);
         return true;
     }
@@ -110,7 +113,8 @@ public class VectorDb {
      */
     public boolean deleteFromDelta(String indexName, long id) {
         DeltaBuffer buf = deltaBuffers.get(indexName);
-        if (buf == null) return false;
+        if (buf == null)
+            return false;
         return buf.delete(id);
     }
 
@@ -119,12 +123,13 @@ public class VectorDb {
      *
      * @param indexName name of the index whose delta buffer to back up
      * @param path      target file path
-     * @throws IOException              on I/O failure
-     * @throws IllegalStateException    if no delta buffer exists for the index
+     * @throws IOException           on I/O failure
+     * @throws IllegalStateException if no delta buffer exists for the index
      */
     public void backupDelta(String indexName, String path) throws IOException {
         DeltaBuffer buf = deltaBuffers.get(indexName);
-        if (buf == null) throw new IllegalStateException("No delta buffer for index: " + indexName);
+        if (buf == null)
+            throw new IllegalStateException("No delta buffer for index: " + indexName);
         buf.serializeToPath(path);
     }
 
@@ -143,7 +148,8 @@ public class VectorDb {
     }
 
     /**
-     * Performs a unified search that queries both the base index and the delta buffer,
+     * Performs a unified search that queries both the base index and the delta
+     * buffer,
      * merges the results, and returns the top-K by score.
      *
      * @param indexName name of the index
@@ -153,7 +159,8 @@ public class VectorDb {
      */
     public List<Index.SearchResult> searchMerged(String indexName, float[] query, int k) {
         Index index = indices.get(indexName);
-        if (index == null) throw new IllegalArgumentException("Unknown index: " + indexName);
+        if (index == null)
+            throw new IllegalArgumentException("Unknown index: " + indexName);
 
         List<Index.SearchResult> baseResults = index.search(query, k);
 
@@ -166,8 +173,10 @@ public class VectorDb {
 
         // Merge and deduplicate by ID, then take top-K by score
         java.util.Map<Long, Index.SearchResult> merged = new java.util.LinkedHashMap<>();
-        for (Index.SearchResult r : baseResults)  merged.put(r.id(), r);
-        for (Index.SearchResult r : deltaResults) merged.putIfAbsent(r.id(), r);
+        for (Index.SearchResult r : baseResults)
+            merged.put(r.id(), r);
+        for (Index.SearchResult r : deltaResults)
+            merged.putIfAbsent(r.id(), r);
 
         return merged.values().stream()
                 .sorted((a, b) -> Integer.compare(a.score(), b.score()))
@@ -176,16 +185,20 @@ public class VectorDb {
     }
 
     /**
-     * Compiles raw float records into a multi-tier, cache-aligned database file layout.
+     * Compiles raw float records into a multi-tier, cache-aligned database file
+     * layout.
      */
-    public static void compileIndexFile(String basePath, byte planetId, long planetRadius, int dimension, int[] tiers, List<VectorRecord> records) throws IOException {
+    public static void compileIndexFile(String basePath, byte planetId, long planetRadius, int dimension, int[] tiers,
+            List<VectorRecord> records) throws IOException {
         compileIndexFile(basePath, planetId, planetRadius, dimension, tiers, records, 0);
     }
 
     /**
-     * Compiles raw float records into a multi-tier, cache-aligned database file layout with qMode.
+     * Compiles raw float records into a multi-tier, cache-aligned database file
+     * layout with qMode.
      */
-    public static void compileIndexFile(String basePath, byte planetId, long planetRadius, int dimension, int[] tiers, List<VectorRecord> records, int qMode) throws IOException {
+    public static void compileIndexFile(String basePath, byte planetId, long planetRadius, int dimension, int[] tiers,
+            List<VectorRecord> records, int qMode) throws IOException {
         if (records == null || records.isEmpty()) {
             throw new IllegalArgumentException("Records list cannot be null or empty");
         }
@@ -202,9 +215,9 @@ public class VectorDb {
                 StandardOpenOption.WRITE,
                 StandardOpenOption.READ,
                 StandardOpenOption.TRUNCATE_EXISTING)) {
-            
+
             MemorySegment mapped = channel.map(FileChannel.MapMode.READ_WRITE, 0, 64, Arena.global());
-            
+
             // Magic bytes
             mapped.set(ValueLayout.JAVA_BYTE, 0, (byte) 'P');
             mapped.set(ValueLayout.JAVA_BYTE, 1, (byte) 'L');
@@ -237,7 +250,8 @@ public class VectorDb {
             mapped.force();
         }
 
-        // 3. Write Metadata file (tombstones & attributes, default value is 2 for all-active)
+        // 3. Write Metadata file (tombstones & attributes, default value is 2 for
+        // all-active)
         Path metadataPath = Path.of(basePath + "_metadata.bin");
         try (FileChannel channel = FileChannel.open(metadataPath,
                 StandardOpenOption.CREATE,
@@ -255,17 +269,17 @@ public class VectorDb {
         // 4. Transform, Binarize, and Write Tier files
         TransformOperator transformer = new TransformOperator(dimension, tiers);
         int numTiers = tiers.length;
-        
+
         int[] tierLongs = new int[numTiers];
         FileChannel[] tierChannels = new FileChannel[numTiers];
         MemorySegment[] tierMappeds = new MemorySegment[numTiers];
-        
+
         int prevBound = 0;
         for (int k = 0; k < numTiers; k++) {
             int width = tiers[k] - prevBound;
             tierLongs[k] = width / 64;
             prevBound = tiers[k];
-            
+
             Path tierPath = Path.of(basePath + "_tier_" + k + ".bin");
             tierChannels[k] = FileChannel.open(tierPath,
                     StandardOpenOption.CREATE,
@@ -273,11 +287,12 @@ public class VectorDb {
                     StandardOpenOption.READ,
                     StandardOpenOption.TRUNCATE_EXISTING);
             long bytesPerRecord = switch (qMode) {
-                case 1 -> (width / 4);   // 2-bit: 2 bits/dim -> width/4 bytes
-                case 2 -> (width * 4L);  // Float-Hybrid: raw float32 -> 4 bytes/dim
-                default -> (width / 8);  // 1-bit: 1 bit/dim -> width/8 bytes
+                case 1 -> (width / 4); // 2-bit: 2 bits/dim -> width/4 bytes
+                case 2 -> (width * 4L); // Float-Hybrid: raw float32 -> 4 bytes/dim
+                default -> (width / 8); // 1-bit: 1 bit/dim -> width/8 bytes
             };
-            tierMappeds[k] = tierChannels[k].map(FileChannel.MapMode.READ_WRITE, 0, totalRecords * bytesPerRecord, Arena.global());
+            tierMappeds[k] = tierChannels[k].map(FileChannel.MapMode.READ_WRITE, 0, totalRecords * bytesPerRecord,
+                    Arena.global());
         }
 
         try {
@@ -289,14 +304,15 @@ public class VectorDb {
                     long[][] packed = transformer.quantize2Bit(z, threshold);
                     long[] signPacked = packed[0];
                     long[] maskPacked = packed[1];
-                    
+
                     int longOffset = 0;
                     for (int k = 0; k < numTiers; k++) {
                         int count = tierLongs[k];
                         long baseOffset = i * (count * 16L);
                         for (int l = 0; l < count; l++) {
                             tierMappeds[k].set(ValueLayout.JAVA_LONG, baseOffset + (l * 8), signPacked[longOffset + l]);
-                            tierMappeds[k].set(ValueLayout.JAVA_LONG, baseOffset + (count * 8L) + (l * 8), maskPacked[longOffset + l]);
+                            tierMappeds[k].set(ValueLayout.JAVA_LONG, baseOffset + (count * 8L) + (l * 8),
+                                    maskPacked[longOffset + l]);
                         }
                         longOffset += count;
                     }
@@ -338,8 +354,10 @@ public class VectorDb {
             }
         }
 
-        // 5. Write FP16 sidecar: stores original (pre-rotation) vectors in IEEE 754 half-precision.
-        //    2 bytes per dimension, row-major layout. Used for high-recall in-engine Stage 2 reranking.
+        // 5. Write FP16 sidecar: stores original (pre-rotation) vectors in IEEE 754
+        // half-precision.
+        // 2 bytes per dimension, row-major layout. Used for high-recall in-engine Stage
+        // 2 reranking.
         Path fp16Path = Path.of(basePath + "_fp16.bin");
         try (FileChannel channel = FileChannel.open(fp16Path,
                 StandardOpenOption.CREATE,
