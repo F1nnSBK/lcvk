@@ -33,34 +33,38 @@ else
 fi
 
 # Discipline 1: General-Purpose KNN Search
-echo -e "${BLUE}=== Step 1/8: Baseline Benchmarks (JIT loop & FAISS) ===${NC}"
+echo -e "${BLUE}=== Step 1/9: Baseline Benchmarks (JIT loop & FAISS) ===${NC}"
 $PYTHON_BIN benchmark_baselines.py
 
-echo -e "\n${BLUE}=== Step 2/8: Pithos Scale Performance Benchmark ===${NC}"
+echo -e "\n${BLUE}=== Step 2/9: Pithos Scale Performance Benchmark ===${NC}"
 $PYTHON_BIN benchmark.py
 
-echo -e "\n${BLUE}=== Step 3/8: Recall@K -- Speed-Accuracy Trade-Off ===${NC}"
+echo -e "\n${BLUE}=== Step 3/9: Recall@K -- Speed-Accuracy Trade-Off ===${NC}"
 $PYTHON_BIN benchmark_recall.py
 
 # Discipline 2: Application-Specific Resonant Voting
-echo -e "\n${BLUE}=== Step 4/8: Resonant Voting Stress-Test (Pithos vs FAISS Emulated) ===${NC}"
+echo -e "\n${BLUE}=== Step 4/9: Resonant Voting Stress-Test (Pithos vs FAISS Emulated) ===${NC}"
 $PYTHON_BIN benchmark_voting.py
 
 # Dimensionality Crossover Sweep
-echo -e "\n${BLUE}=== Step 5/8: Crossover Sweep (Single vs Multi Query x Dimensions) ===${NC}"
+echo -e "\n${BLUE}=== Step 5/9: Crossover Sweep (Single vs Multi Query x Dimensions) ===${NC}"
 $PYTHON_BIN benchmark_sweep.py
 
 # SIFT10K Generalization Benchmark
-echo -e "\n${BLUE}=== Step 6/8: SIFT10K Generalization Benchmark ===${NC}"
+echo -e "\n${BLUE}=== Step 6/9: SIFT10K Generalization Benchmark ===${NC}"
 $PYTHON_BIN benchmark_sift.py
 
 # FFI Boundary Analysis
-echo -e "\n${BLUE}=== Step 7/8: FFI Boundary Analysis ===${NC}"
+echo -e "\n${BLUE}=== Step 7/9: FFI Boundary Analysis ===${NC}"
 $PYTHON_BIN benchmark_ffi.py
 
 # Candidate Generation Recall (Workload Reduction Elbow Curve)
-echo -e "\n${BLUE}=== Step 8/8: Downstream Workload Reduction & Recall Elbow Curve ===${NC}"
+echo -e "\n${BLUE}=== Step 8/9: Downstream Workload Reduction & Recall Elbow Curve ===${NC}"
 $PYTHON_BIN benchmark_candidate_recall.py
+
+# Ablation & LSM Delta-Buffer Benchmarks (SIMD, QMode, FP16, DeltaBuffer)
+echo -e "\n${BLUE}=== Step 9/9: Pithos Ablation & LSM Delta-Buffer Benchmarks ===${NC}"
+$PYTHON_BIN run_ablation_benchmarks.py
 
 # Finalize: regenerate all plots and update README.md
 echo -e "\n${BLUE}=== Updating README.md with live benchmark results ===${NC}"
