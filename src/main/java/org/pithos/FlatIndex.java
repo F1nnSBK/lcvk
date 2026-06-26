@@ -23,66 +23,16 @@ import com.lmax.disruptor.WorkHandler;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 
-
-
 /**
  * <h3>FlatIndex: Off-heap Memory-mapped Multi-Tier Vector Index</h3>
- *
- * <p>FlatIndex maps compiled index files directly off-heap into virtual memory
- * segments, bypassing Java heap GC overhead and enabling zero-copy C FFI access.
- *
- * <p><h3>Binary File Layout Specifications (C/FPGA-friendly):</h3>
- * <p>A compiled index consists of several files on disk sharing a base prefix:
- * <ol>
- *   <li><b>Base Config Header ({@code <prefix>})</b>:
- *       64-byte aligned header storing core configuration parameters:
- *       <ul>
- *         <li>Offsets 0-3: Magic signature bytes {@code "PLAN"}</li>
- *         <li>Offset 4: Planet ID (1 byte, 1=Moon, 2=Mars, etc.)</li>
- *         <li>Offsets 5-12: Total record count N (64-bit int / long)</li>
- *         <li>Offsets 13-20: Planet equatorial radius in meters (64-bit int / long)</li>
- *         <li>Offsets 21-24: Original float vector dimension D (32-bit int)</li>
- *         <li>Offsets 25-28: Number of Matryoshka tiers T (32-bit int)</li>
- *         <li>Offsets 29-60: Array of tier dimension step boundaries (up to 8 tiers, 32-bit int each)</li>
- *         <li>Offset 61: Quantization Mode (1 byte: 0 = 1-bit, 1 = 2-bit, 2 = float32 bypass)</li>
- *       </ul>
- *   </li>
- *   <li><b>Record IDs Table ({@code <prefix>_ids.bin})</b>:
- *       Contiguous binary array of {@code N} 64-bit integers (longs) storing resolved vector IDs.
- *   </li>
- *   <li><b>Metadata Table ({@code <prefix>_metadata.bin})</b>:
- *       Contiguous binary array of {@code N} 64-bit integers storing record flags.
- *       Bit 0 acts as a tombstone (1 = deleted, 0 = active).
- *       Other bits store custom attributes for multi-criteria filtering.
- *   </li>
- *   <li><b>Tier Binary Tables ({@code <prefix>_tier_<k>.bin})</b>:
- *       Bit-packed tables containing binarized or raw representations, partitioned by cumulative dimensions.
- *       For 1-bit (qMode=0): packed sign bits (1 bit/dim), row-major.
- *       For 2-bit (qMode=1): sign bits followed by active masks (2 bits/dim), row-major.
- *       For Float-hybrid (qMode=2): raw rotated float32 values (4 bytes/dim), row-major.
- *   </li>
- *   <li><b>FP16 Sidecar File ({@code <prefix>_fp16.bin})</b>:
- *       Optional contiguous binary array storing original (pre-rotation) vectors in IEEE 754 half-precision (2 bytes/dim).
- *       Used for direct native off-heap Stage 2 exact L2 reranking.
- *   </li>
- * </ol>
- *
- * <p><h3>Search Execution Pipeline:</h3>
- * <p>FlatIndex uses a lock-free multi-threaded pipeline coordinated by an LMAX Disruptor:
- * <ol>
- *   <li>Stage 1: Coarse Hamming distance scan over active tiers in parallel chunks to find top candidate lists.</li>
- *   <li>Stage 2: Exact FP16 off-heap L2 reranking on candidate lists using the FP16 sidecar to resolve neighbors.</li>
- * </ol>
  */
 public class FlatIndex implements Index {
-
-
 
     private final MemorySegment baseSegment;
     private final MemorySegment idsSegment;
     private final MemorySegment[] tierSegments;
     private final MemorySegment metadataSegment;
-    private final MemorySegment fp16Segment; // Optional FP16 sidecar; null if not present
+    private final MemorySegment fp16Segment;
 
     private final byte planetId;
     private final long planetRadius;
@@ -93,15 +43,13 @@ public class FlatIndex implements Index {
 
     private final TransformOperator transformOperator;
     private final float[] cumulativeEnergy;
-    private double targetEnergyBudget = 0.90; // Default energy threshold tau
+    private double targetEnergyBudget = 0.90;
     private final int qMode;
     private final int[] tierLongs;
     private final int[] tierOffsets;
 
-    /** Dimension threshold below which we skip Hamming compression and use direct float L2. */
     private static final int SIMD_FLOAT_DIM_THRESHOLD = 32;
 
-    // Disruptor context
     private final Disruptor<RangeEvent> disruptor;
     private final RingBuffer<RangeEvent> ringBuffer;
     private final int numWorkers;
@@ -131,7 +79,6 @@ public class FlatIndex implements Index {
         public boolean isVoting;
         public CountDownLatch latch;
 
-        // Voting parameters
         public int[] families;
         public int[] thresholds;
         public MemorySegment[] threadLocalMasks;
@@ -203,6 +150,7 @@ public class FlatIndex implements Index {
         this.size = size;
         this.cumulativeEnergy = cumulativeEnergy;
         this.qMode = qMode;
+
         this.tierLongs = new int[numTiers];
         int prevBoundVal = 0;
         for (int idx = 0; idx < numTiers; idx++) {
@@ -265,16 +213,14 @@ public class FlatIndex implements Index {
     }
 
     public long getTierAddress(int tierIdx) {
-        if (tierIdx < 0 || tierIdx >= numTiers) {
+        if (tierIdx < 0 || tierIdx >= numTiers)
             return 0;
-        }
         return tierSegments[tierIdx].address();
     }
 
     public long getTierByteSize(int tierIdx) {
-        if (tierIdx < 0 || tierIdx >= numTiers) {
+        if (tierIdx < 0 || tierIdx >= numTiers)
             return 0;
-        }
         return tierSegments[tierIdx].byteSize();
     }
 
@@ -304,13 +250,11 @@ public class FlatIndex implements Index {
             throw new IOException("Base file path does not exist: " + basePath);
         }
 
-        // 1. Read base file and 64-byte Header
         MemorySegment mappedBase;
         try (FileChannel channel = FileChannel.open(mainPath, StandardOpenOption.READ)) {
             mappedBase = channel.map(FileChannel.MapMode.READ_ONLY, 0, 64, Arena.global());
         }
 
-        // Validate Header Magic
         byte m0 = mappedBase.get(ValueLayout.JAVA_BYTE, 0);
         byte m1 = mappedBase.get(ValueLayout.JAVA_BYTE, 1);
         byte m2 = mappedBase.get(ValueLayout.JAVA_BYTE, 2);
@@ -333,30 +277,27 @@ public class FlatIndex implements Index {
         byte qModeByte = mappedBase.get(ValueLayout.JAVA_BYTE, 61);
         int qMode = qModeByte & 0xFF;
 
-        // 2. Map ID file
         Path idsPath = Path.of(basePath + "_ids.bin");
         MemorySegment idsSegment;
         try (FileChannel channel = FileChannel.open(idsPath, StandardOpenOption.READ)) {
             idsSegment = channel.map(FileChannel.MapMode.READ_ONLY, 0, totalRecords * 8, Arena.global());
         }
 
-        // 3. Map metadata file
         Path metadataPath = Path.of(basePath + "_metadata.bin");
         MemorySegment metadataSegment;
         try (FileChannel channel = FileChannel.open(metadataPath, StandardOpenOption.READ)) {
             metadataSegment = channel.map(FileChannel.MapMode.READ_ONLY, 0, totalRecords * 8, Arena.global());
         }
 
-        // 4. Map Tier files
         MemorySegment[] tierSegments = new MemorySegment[numTiers];
         int prevBound = 0;
         for (int k = 0; k < numTiers; k++) {
             int width = tiers[k] - prevBound;
             Path tierPath = Path.of(basePath + "_tier_" + k + ".bin");
             long bytesPerRecord = switch (qMode) {
-                case 1 -> (width / 4);   // 2-bit ternary
-                case 2 -> (width * 4L);  // Float-Hybrid: raw float32
-                default -> (width / 8);  // 1-bit sign
+                case 1 -> (width / 4);
+                case 2 -> (width * 4L);
+                default -> (width / 8);
             };
             try (FileChannel channel = FileChannel.open(tierPath, StandardOpenOption.READ)) {
                 tierSegments[k] = channel.map(FileChannel.MapMode.READ_ONLY, 0, totalRecords * bytesPerRecord,
@@ -365,7 +306,6 @@ public class FlatIndex implements Index {
             prevBound = tiers[k];
         }
 
-        // 5. Compute or estimate cumulative energy
         float[] cumulativeEnergy = new float[numTiers];
         if (weights != null) {
             float[] allPhi = TransformOperator.computeCumulativeEnergy(weights, dimension, loraDim);
@@ -373,19 +313,17 @@ public class FlatIndex implements Index {
                 cumulativeEnergy[k] = allPhi[tiers[k] - 1];
             }
         } else {
-            // Equal distribution fallback
             for (int k = 0; k < numTiers; k++) {
                 cumulativeEnergy[k] = (float) tiers[k] / dimension;
             }
         }
 
-        // 6. Optionally map FP16 sidecar (basePath + "_fp16.bin")
         MemorySegment fp16Segment = null;
         Path fp16Path = Path.of(basePath + "_fp16.bin");
         if (fp16Path.toFile().exists()) {
             try (FileChannel channel = FileChannel.open(fp16Path, StandardOpenOption.READ)) {
-                fp16Segment = channel.map(FileChannel.MapMode.READ_ONLY, 0,
-                        totalRecords * dimension * 2L, Arena.global());
+                fp16Segment = channel.map(FileChannel.MapMode.READ_ONLY, 0, totalRecords * dimension * 2L,
+                        Arena.global());
             }
         }
 
@@ -407,47 +345,33 @@ public class FlatIndex implements Index {
     @Override
     @SuppressWarnings("unchecked")
     public List<SearchResult>[] batchSearch(float[][] queries, int k) {
-        if (queries == null || queries.length == 0) {
+        if (queries == null || queries.length == 0)
             return new List[0];
-        }
-        if (k <= 0) {
-            List<SearchResult>[] empty = new List[queries.length];
-            Arrays.fill(empty, List.of());
-            return empty;
-        }
-
-        long numRecords = this.size;
-        if (numRecords == 0) {
+        if (k <= 0 || size == 0) {
             List<SearchResult>[] empty = new List[queries.length];
             Arrays.fill(empty, List.of());
             return empty;
         }
 
         int numQueries = queries.length;
+        int kCandidate = (int) Math.min(size, Math.max(100, 3 * k));
 
-        // Stage 1: Coarse Hamming/Ternary search returning candidates as internal row indices.
-        // We evaluate more candidates for reranking.
-        int kCandidate = (int) Math.min(numRecords, Math.max(100, 3 * k));
-
-        // Allocate thread-local structures to hold top-K candidates
         long[][][] threadLocalIds = new long[numWorkers][numQueries][kCandidate];
         int[][][] threadLocalDists = new int[numWorkers][numQueries][kCandidate];
 
-        // Initialize distances to infinity
         for (int w = 0; w < numWorkers; w++) {
             for (int q = 0; q < numQueries; q++) {
                 Arrays.fill(threadLocalDists[w][q], Integer.MAX_VALUE);
             }
         }
 
-        // Divide work into lock-free chunk events
         long currentChunkSize = this.chunkSize;
-        long numChunks = (numRecords + currentChunkSize - 1) / currentChunkSize;
+        long numChunks = (size + currentChunkSize - 1) / currentChunkSize;
         CountDownLatch latch = new CountDownLatch((int) numChunks);
 
         for (long c = 0; c < numChunks; c++) {
             long startIdx = c * currentChunkSize;
-            long endIdx = Math.min(startIdx + currentChunkSize, numRecords);
+            long endIdx = Math.min(startIdx + currentChunkSize, size);
 
             long sequence = ringBuffer.next();
             try {
@@ -465,13 +389,11 @@ public class FlatIndex implements Index {
             throw new RuntimeException("Search execution was interrupted", e);
         }
 
-        // Precondition and rotate queries to the same space as quantized vectors
         float[][] zQueries = new float[numQueries][];
         for (int q = 0; q < numQueries; q++) {
             zQueries[q] = transformOperator.preconditionAndRotate(queries[q]);
         }
 
-        // Stage 2: Asymmetric Reranking (parallelized over queries to minimize latency)
         List<SearchResult>[] finalResults = new List[numQueries];
         IntStream.range(0, numQueries).forEach(q -> {
             List<SearchResult> merged = new ArrayList<>();
@@ -485,7 +407,6 @@ public class FlatIndex implements Index {
                 }
             }
 
-            // Sort merged matches by Stage 1 distance (ascending)
             merged.sort((r1, r2) -> {
                 int cmp = Integer.compare(r1.score(), r2.score());
                 if (cmp != 0)
@@ -493,20 +414,16 @@ public class FlatIndex implements Index {
                 return Long.compare(r1.id(), r2.id());
             });
 
-            // Dedup candidates and keep the top kCandidate unique candidates
             List<Long> candidates = new ArrayList<>();
             Set<Long> seen = new HashSet<>();
             for (SearchResult r : merged) {
-                long rowIdx = r.id();
-                if (seen.add(rowIdx)) {
-                    candidates.add(rowIdx);
-                    if (candidates.size() >= kCandidate) {
+                if (seen.add(r.id())) {
+                    candidates.add(r.id());
+                    if (candidates.size() >= kCandidate)
                         break;
-                    }
                 }
             }
 
-            // Compute exact query L2 norm and sum for the distance offset
             double queryL2Norm = 0.0;
             double querySum = 0.0;
             for (float val : zQueries[q]) {
@@ -514,8 +431,6 @@ public class FlatIndex implements Index {
                 querySum += val;
             }
 
-            // For QMode 2 (Float-Hybrid), Stage 1 already produced exact L2 distances.
-            // Skip asymmetric reranking; directly resolve record IDs.
             if (qMode == 2) {
                 List<SearchResult> queryResults = new ArrayList<>();
                 int limit = Math.min(k, candidates.size());
@@ -528,24 +443,22 @@ public class FlatIndex implements Index {
                 return;
             }
 
-            // Rerank candidates using exact asymmetric float-ternary L2 distance
             class RerankedCandidate {
                 final long rowIdx;
                 final double distance;
+
                 RerankedCandidate(long rowIdx, double distance) {
                     this.rowIdx = rowIdx;
                     this.distance = distance;
                 }
             }
 
-            // Choose reranking strategy:
-            //  - If FP16 sidecar is present: use exact L2 on original (pre-rotation) vectors → highest recall
-            //  - Otherwise: use asymmetric binary/ternary L2 estimator (cheaper, slightly lower recall)
             List<RerankedCandidate> reranked = new ArrayList<>();
             if (fp16Segment != null) {
-                float[] rawQuery = queries[q]; // raw (pre-rotation) query
+                float[] rawQuery = queries[q];
+                short[] localFp16 = new short[dimension];
                 for (long rowIdx : candidates) {
-                    double dist = computeExactL2FP16(rawQuery, rowIdx);
+                    double dist = computeExactL2FP16(rawQuery, rowIdx, localFp16);
                     reranked.add(new RerankedCandidate(rowIdx, dist));
                 }
             } else {
@@ -555,10 +468,8 @@ public class FlatIndex implements Index {
                 }
             }
 
-            // Sort by distance (ascending)
             reranked.sort((c1, c2) -> Double.compare(c1.distance, c2.distance));
 
-            // Select top K and resolve original record IDs
             List<SearchResult> queryResults = new ArrayList<>();
             int limit = Math.min(k, reranked.size());
             for (int i = 0; i < limit; i++) {
@@ -576,22 +487,21 @@ public class FlatIndex implements Index {
             int[][] myDists) {
         int numQueries = queries.length;
 
-        // Binarize all queries once
+        // Binarize queries
         long[][] bQueries = new long[numQueries][];
         long[][] bQueriesMask = new long[numQueries][];
         for (int q = 0; q < numQueries; q++) {
-            if (qMode == 1) { // 2-bit mode
+            if (qMode == 1) {
                 float[] z = transformOperator.preconditionAndRotate(queries[q]);
                 float qThreshold = TransformOperator.calculatePercentileThreshold(z, 0.20f);
                 long[][] packed = transformOperator.quantize2Bit(z, qThreshold);
                 bQueries[q] = packed[0];
                 bQueriesMask[q] = packed[1];
-            } else {
+            } else if (qMode == 0) {
                 bQueries[q] = transformOperator.transformAndQuantize(queries[q]);
             }
         }
 
-        // Determine target active truncation tier T
         int T = 0;
         for (int i = 0; i < numTiers; i++) {
             if (cumulativeEnergy[i] >= targetEnergyBudget) {
@@ -600,72 +510,27 @@ public class FlatIndex implements Index {
             }
         }
 
-        // --- SIMD Float-L2 dispatch for D <= SIMD_FLOAT_DIM_THRESHOLD (1-bit mode only) ---
-        if (dimension <= SIMD_FLOAT_DIM_THRESHOLD && qMode == 0) {
-            // For tiny dimensions the Hamming approximation introduces large relative error.
-            // Instead: reconstruct ±1 float vectors from sign bits and use exact VectorAPI L2.
-            float[][] rotQueries = new float[numQueries][];
-            for (int q = 0; q < numQueries; q++) {
-                rotQueries[q] = transformOperator.preconditionAndRotate(queries[q]);
-            }
-            int numLongs0 = tierLongs[0];
-            float[] dbFloat = new float[dimension];
-            for (long i = startIdx; i < endIdx; i++) {
-                long metaVal = metadataSegment.get(ValueLayout.JAVA_LONG, i * 8);
-                if ((metaVal & 1L) == 1L) continue;
-                long baseOff = i * (numLongs0 * 8L);
-                for (int d = 0; d < dimension; d++) {
-                    long word = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOff + (d / 64) * 8);
-                    dbFloat[d] = ((word >>> (d % 64)) & 1L) != 0L ? 1.0f : -1.0f;
-                }
-                for (int q = 0; q < numQueries; q++) {
-                    float dist = transformOperator.computeL2Float(rotQueries[q], dbFloat);
-                    int iDist = (int) (dist * 1000f);
-                    int[] dists = myDists[q];
-                    long[] ids = myIds[q];
-                    if (iDist < dists[k - 1]) {
-                        int pos = k - 1;
-                        while (pos > 0 && iDist < dists[pos - 1]) {
-                            dists[pos] = dists[pos - 1];
-                            ids[pos] = ids[pos - 1];
-                            pos--;
-                        }
-                        dists[pos] = iDist;
-                        ids[pos] = i;
-                    }
-                }
-            }
-            return; // Skip standard Hamming path
-        }
-        // --- End SIMD Float-L2 dispatch ---
+        MemorySegment metaSeg = this.metadataSegment;
+        MemorySegment[] localTiers = this.tierSegments;
+        MemorySegment tier0 = localTiers[0];
 
-        // --- QMode 2: Float-Hybrid raw bypass ---
-        if (qMode == 2) {
-            // Tier files store raw rotated float32 values (no quantization).
-            // Read them directly off-heap and compute exact VectorAPI L2.
+        // SIMD Float-L2 dispatch (D <= 32)
+        if (dimension <= SIMD_FLOAT_DIM_THRESHOLD && qMode == 0) {
             float[][] rotQueries = new float[numQueries][];
-            for (int q = 0; q < numQueries; q++) {
+            for (int q = 0; q < numQueries; q++)
                 rotQueries[q] = transformOperator.preconditionAndRotate(queries[q]);
-            }
             float[] dbFloat = new float[dimension];
-            int dimOffset = 0;
+            int numLongs0 = tierLongs[0];
             for (long i = startIdx; i < endIdx; i++) {
-                long metaVal = metadataSegment.get(ValueLayout.JAVA_LONG, i * 8);
-                if ((metaVal & 1L) == 1L) continue;
-                // Reconstruct full float vector from all tiers
-                dimOffset = 0;
-                for (int tierIdx = 0; tierIdx < numTiers; tierIdx++) {
-                    int startDim = tierIdx == 0 ? 0 : tiers[tierIdx - 1];
-                    int width = tiers[tierIdx] - startDim;
-                    long baseOffset = i * (width * 4L);
-                    for (int d = 0; d < width; d++) {
-                        dbFloat[dimOffset + d] = tierSegments[tierIdx].get(ValueLayout.JAVA_FLOAT, baseOffset + d * 4L);
-                    }
-                    dimOffset += width;
+                if ((metaSeg.get(ValueLayout.JAVA_LONG, i * 8) & 1L) == 1L)
+                    continue;
+                long baseOff = i * (numLongs0 * 8L);
+                long word = tier0.get(ValueLayout.JAVA_LONG, baseOff);
+                for (int d = 0; d < dimension; d++) {
+                    dbFloat[d] = ((word >>> d) & 1L) != 0L ? 1.0f : -1.0f;
                 }
                 for (int q = 0; q < numQueries; q++) {
-                    float dist = transformOperator.computeL2Float(rotQueries[q], dbFloat);
-                    int iDist = (int) (dist * 1000f);
+                    int iDist = (int) (transformOperator.computeL2Float(rotQueries[q], dbFloat) * 1000f);
                     int[] dists = myDists[q];
                     long[] ids = myIds[q];
                     if (iDist < dists[k - 1]) {
@@ -682,71 +547,88 @@ public class FlatIndex implements Index {
             }
             return;
         }
-        // --- End QMode 2 dispatch ---
 
+        // QMode 2: Float-Hybrid raw bypass
+        if (qMode == 2) {
+            float[][] rotQueries = new float[numQueries][];
+            for (int q = 0; q < numQueries; q++)
+                rotQueries[q] = transformOperator.preconditionAndRotate(queries[q]);
+            float[] dbFloat = new float[dimension];
+            for (long i = startIdx; i < endIdx; i++) {
+                if ((metaSeg.get(ValueLayout.JAVA_LONG, i * 8) & 1L) == 1L)
+                    continue;
+                int dimOffset = 0;
+                for (int tierIdx = 0; tierIdx < numTiers; tierIdx++) {
+                    int width = tiers[tierIdx] - (tierIdx == 0 ? 0 : tiers[tierIdx - 1]);
+                    long baseOffset = i * (width * 4L);
+                    MemorySegment.copy(localTiers[tierIdx], ValueLayout.JAVA_FLOAT, baseOffset, dbFloat, dimOffset, width);
+                    dimOffset += width;
+                }
+                for (int q = 0; q < numQueries; q++) {
+                    int iDist = (int) (transformOperator.computeL2Float(rotQueries[q], dbFloat) * 1000f);
+                    int[] dists = myDists[q];
+                    long[] ids = myIds[q];
+                    if (iDist < dists[k - 1]) {
+                        int pos = k - 1;
+                        while (pos > 0 && iDist < dists[pos - 1]) {
+                            dists[pos] = dists[pos - 1];
+                            ids[pos] = ids[pos - 1];
+                            pos--;
+                        }
+                        dists[pos] = iDist;
+                        ids[pos] = i;
+                    }
+                }
+            }
+            return;
+        }
+
+        // Standard Hamming Path (QMode 0 & 1): Sequential Loading with Early Exit
         int totalLongs = dimension / 64;
         long[] dbWords = new long[totalLongs];
         long[] dbMasks = new long[totalLongs];
 
         for (long i = startIdx; i < endIdx; i++) {
-            // Gate 1: Tombstone & Attribute Mask
-            long metaVal = metadataSegment.get(ValueLayout.JAVA_LONG, i * 8);
-            if ((metaVal & 1L) == 1L) {
-                continue; // Tombstone active -> Deleted
-            }
+            if ((metaSeg.get(ValueLayout.JAVA_LONG, i * 8) & 1L) == 1L)
+                continue;
 
-            int loadedTiers = 1; // Bit 0 is loaded
+            // Load all active tiers up to T for record i first
             if (qMode == 1) { // 2-bit mode
-                int numLongs0 = tierLongs[0];
-                long baseOffset0 = i * (numLongs0 * 16L);
-                for (int l = 0; l < numLongs0; l++) {
-                    dbWords[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (l * 8));
-                    dbMasks[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (numLongs0 * 8L) + (l * 8));
+                for (int tierIdx = 0; tierIdx <= T; tierIdx++) {
+                    int numLongs = tierLongs[tierIdx];
+                    int offset = tierOffsets[tierIdx];
+                    MemorySegment tierSeg = localTiers[tierIdx];
+                    long baseOffset = i * (numLongs * 16L);
+                    MemorySegment.copy(tierSeg, ValueLayout.JAVA_LONG, baseOffset, dbWords, offset, numLongs);
+                    MemorySegment.copy(tierSeg, ValueLayout.JAVA_LONG, baseOffset + (numLongs * 8L), dbMasks, offset, numLongs);
                 }
             } else { // 1-bit mode
-                int numLongs0 = tierLongs[0];
-                long baseOffset0 = i * (numLongs0 * 8L);
-                for (int l = 0; l < numLongs0; l++) {
-                    dbWords[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (l * 8));
+                for (int tierIdx = 0; tierIdx <= T; tierIdx++) {
+                    int numLongs = tierLongs[tierIdx];
+                    int offset = tierOffsets[tierIdx];
+                    MemorySegment tierSeg = localTiers[tierIdx];
+                    long baseOffset = i * (numLongs * 8L);
+                    MemorySegment.copy(tierSeg, ValueLayout.JAVA_LONG, baseOffset, dbWords, offset, numLongs);
                 }
             }
 
-            // Gate 3: XOR-Popcount Cascade
+            // Evaluate queries against pre-loaded database words
             for (int q = 0; q < numQueries; q++) {
                 int[] dists = myDists[q];
                 int currentLimit = dists[k - 1];
 
                 int totalDist = 0;
-                int queryOffsetLongs = 0;
 
                 for (int tierIdx = 0; tierIdx <= T; tierIdx++) {
                     int numLongs = tierLongs[tierIdx];
-
-                    // Load tierIdx on demand if not loaded yet
-                    if ((loadedTiers & (1 << tierIdx)) == 0) {
-                        int offset = tierOffsets[tierIdx];
-                        if (qMode == 1) {
-                            long baseOffset = i * (numLongs * 16L);
-                            for (int l = 0; l < numLongs; l++) {
-                                dbWords[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
-                                dbMasks[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (numLongs * 8L) + (l * 8));
-                            }
-                        } else {
-                            long baseOffset = i * (numLongs * 8L);
-                            for (int l = 0; l < numLongs; l++) {
-                                dbWords[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
-                            }
-                        }
-                        loadedTiers |= (1 << tierIdx);
-                    }
-
+                    int offset = tierOffsets[tierIdx];
                     int tierDist = 0;
                     if (qMode == 1) { // 2-bit mode
                         for (int l = 0; l < numLongs; l++) {
-                            long qSign = bQueries[q][queryOffsetLongs + l];
-                            long qMask = bQueriesMask[q][queryOffsetLongs + l];
-                            long dbSign = dbWords[queryOffsetLongs + l];
-                            long dbMask = dbMasks[queryOffsetLongs + l];
+                            long qSign = bQueries[q][offset + l];
+                            long qMask = bQueriesMask[q][offset + l];
+                            long dbSign = dbWords[offset + l];
+                            long dbMask = dbMasks[offset + l];
                             
                             long mask4 = dbMask & qMask & (dbSign ^ qSign);
                             long mask1 = dbMask ^ qMask;
@@ -754,13 +636,10 @@ public class FlatIndex implements Index {
                         }
                     } else { // 1-bit mode
                         for (int l = 0; l < numLongs; l++) {
-                            long qWord = bQueries[q][queryOffsetLongs + l];
-                            long dbWord = dbWords[queryOffsetLongs + l];
-                            tierDist += Long.bitCount(qWord ^ dbWord);
+                            tierDist += Long.bitCount(bQueries[q][offset + l] ^ dbWords[offset + l]);
                         }
                     }
                     totalDist += tierDist;
-                    queryOffsetLongs += numLongs;
 
                     // If dynamic threshold is exceeded, break early
                     if (totalDist > currentLimit) {
@@ -783,25 +662,38 @@ public class FlatIndex implements Index {
         }
     }
 
+    private double computeExactL2FP16(float[] rawQuery, long rowIdx, short[] localFp16) {
+        long rowOffset = rowIdx * dimension * 2L;
+        MemorySegment.copy(fp16Segment, ValueLayout.JAVA_SHORT, rowOffset, localFp16, 0, dimension);
+        double sum = 0.0;
+        for (int d = 0; d < dimension; d++) {
+            float dbVal = Float.float16ToFloat(localFp16[d]);
+            double diff = rawQuery[d] - dbVal;
+            sum += diff * diff;
+        }
+        return sum;
+    }
+
     private double computeAsymmetricL2DistanceOffHeap(float[] query, double queryL2Norm, double querySum, long rowIdx) {
         int totalMaskPopcount = 0;
         int queryOffsetLongs = 0;
-        
+
         if (qMode == 1) { // 2-bit mode
             double sumPositive = 0.0;
             double sumActive = 0.0;
             for (int tierIdx = 0; tierIdx < numTiers; tierIdx++) {
                 int numLongs = tierLongs[tierIdx];
                 long baseOffset = rowIdx * (numLongs * 16L);
-                
+
                 for (int l = 0; l < numLongs; l++) {
-                    long mask = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (numLongs * 8L) + (l * 8));
-                    if (mask == 0L) {
+                    long mask = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG,
+                            baseOffset + (numLongs * 8L) + (l * 8));
+                    if (mask == 0L)
                         continue;
-                    }
+
                     totalMaskPopcount += Long.bitCount(mask);
                     long word = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
-                    
+
                     int bitOffset = (queryOffsetLongs + l) * 64;
                     int limit = Math.min(64, query.length - bitOffset);
                     long limitMask = limit == 64 ? -1L : (1L << limit) - 1L;
@@ -821,22 +713,11 @@ public class FlatIndex implements Index {
             return totalMaskPopcount + queryL2Norm - 4.0 * sumPositive + 2.0 * sumActive;
         } else { // 1-bit mode
             double sumPositive = 0.0;
-            // Tier 0
-            long word0 = tierSegments[0].get(ValueLayout.JAVA_LONG, rowIdx * 8);
-            int limit0 = Math.min(64, query.length);
-            long limitMask0 = limit0 == 64 ? -1L : (1L << limit0) - 1L;
-            long active0 = word0 & limitMask0;
-            while (active0 != 0) {
-                int bitIdx = Long.numberOfTrailingZeros(active0);
-                sumPositive += query[bitIdx];
-                active0 &= active0 - 1;
-            }
-            
-            queryOffsetLongs = 1;
-            for (int tierIdx = 1; tierIdx < numTiers; tierIdx++) {
+            queryOffsetLongs = 0;
+            for (int tierIdx = 0; tierIdx < numTiers; tierIdx++) {
                 int numLongs = tierLongs[tierIdx];
                 long baseOffset = rowIdx * (numLongs * 8L);
-                
+
                 for (int l = 0; l < numLongs; l++) {
                     long word = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
                     int bitOffset = (queryOffsetLongs + l) * 64;
@@ -855,49 +736,27 @@ public class FlatIndex implements Index {
         }
     }
 
-    /**
-     * Computes exact L2 distance between a raw (pre-rotation) query and the stored FP16 vector at rowIdx.
-     * Requires fp16Segment to be non-null.
-     * The query must be in the original (non-rotated) float space.
-     *
-     * @param rawQuery raw float query vector (pre-rotation)
-     * @param rowIdx   row index in the FP16 sidecar
-     * @return exact L2 squared distance (float precision)
-     */
-    private double computeExactL2FP16(float[] rawQuery, long rowIdx) {
-        long rowOffset = rowIdx * dimension * 2L;
-        double sum = 0.0;
-        for (int d = 0; d < dimension; d++) {
-            short fp16 = fp16Segment.get(ValueLayout.JAVA_SHORT, rowOffset + d * 2L);
-            float dbVal = Float.float16ToFloat(fp16);
-            double diff = rawQuery[d] - dbVal;
-            sum += diff * diff;
-        }
-        return sum;
-    }
-
     @Override
     public long queryPlanetaryGrid(float[][] queries, int[] families, int[] thresholds, MemorySegment votingMask) {
         if (queries == null || queries.length == 0)
             return 0;
         int numQueries = queries.length;
-        long numRecords = this.size;
-        if (numRecords == 0)
+        if (size == 0)
             return 0;
 
         long currentChunkSize = this.chunkSize;
-        long numChunks = (numRecords + currentChunkSize - 1) / currentChunkSize;
+        long numChunks = (size + currentChunkSize - 1) / currentChunkSize;
         CountDownLatch latch = new CountDownLatch((int) numChunks);
 
         Arena arena = Arena.global();
         MemorySegment[] threadLocalMasks = new MemorySegment[numWorkers];
         for (int w = 0; w < numWorkers; w++) {
-            threadLocalMasks[w] = arena.allocate(numRecords);
+            threadLocalMasks[w] = arena.allocate(size);
         }
 
         for (long c = 0; c < numChunks; c++) {
             long startIdx = c * currentChunkSize;
-            long endIdx = Math.min(startIdx + currentChunkSize, numRecords);
+            long endIdx = Math.min(startIdx + currentChunkSize, size);
 
             long sequence = ringBuffer.next();
             try {
@@ -916,17 +775,17 @@ public class FlatIndex implements Index {
         }
 
         int numThreads = Runtime.getRuntime().availableProcessors();
-        long recordsPerThread = numRecords / numThreads;
+        long recordsPerThread = size / numThreads;
         if (recordsPerThread == 0) {
             numThreads = 1;
-            recordsPerThread = numRecords;
+            recordsPerThread = size;
         }
         final int activeThreads = numThreads;
         final long finalRecordsPerThread = recordsPerThread;
 
         return IntStream.range(0, activeThreads).parallel().mapToLong(t -> {
             long startIdx = t * finalRecordsPerThread;
-            long endIdx = (t == activeThreads - 1) ? numRecords : (t + 1) * finalRecordsPerThread;
+            long endIdx = (t == activeThreads - 1) ? size : (t + 1) * finalRecordsPerThread;
             long resonantCount = 0;
             for (long i = startIdx; i < endIdx; i++) {
                 byte mergedVal = 0;
@@ -934,7 +793,6 @@ public class FlatIndex implements Index {
                     mergedVal |= threadLocalMasks[w].get(ValueLayout.JAVA_BYTE, i);
                 }
                 votingMask.set(ValueLayout.JAVA_BYTE, i, mergedVal);
-                // Check if resonance threshold is reached (e.g. >= 5 votes)
                 if (Integer.bitCount(mergedVal & 0xFF) >= 5) {
                     resonantCount++;
                 }
@@ -947,11 +805,10 @@ public class FlatIndex implements Index {
             MemorySegment localMask) {
         int numQueries = queries.length;
 
-        // Binarize all queries once
         long[][] bQueries = new long[numQueries][];
         long[][] bQueriesMask = new long[numQueries][];
         for (int q = 0; q < numQueries; q++) {
-            if (qMode == 1) { // 2-bit mode
+            if (qMode == 1) {
                 float[] z = transformOperator.preconditionAndRotate(queries[q]);
                 float qThreshold = TransformOperator.calculatePercentileThreshold(z, 0.20f);
                 long[][] packed = transformOperator.quantize2Bit(z, qThreshold);
@@ -962,7 +819,6 @@ public class FlatIndex implements Index {
             }
         }
 
-        // Determine target active truncation tier T
         int T = 0;
         for (int i = 0; i < numTiers; i++) {
             if (cumulativeEnergy[i] >= targetEnergyBudget) {
@@ -971,87 +827,74 @@ public class FlatIndex implements Index {
             }
         }
 
-
-
         int totalLongs = dimension / 64;
         long[] dbWords = new long[totalLongs];
         long[] dbMasks = new long[totalLongs];
-        boolean[] active = new boolean[numQueries];
-        int[] accumDists = new int[numQueries];
+
+        MemorySegment metaSeg = this.metadataSegment;
+        MemorySegment[] localTiers = this.tierSegments;
+        MemorySegment tier0 = localTiers[0];
 
         for (long i = startIdx; i < endIdx; i++) {
-            // Gate 1: Tombstone & Attribute Mask
-            long metaVal = metadataSegment.get(ValueLayout.JAVA_LONG, i * 8);
-            if ((metaVal & 1L) == 1L) {
-                continue; // Tombstone active
-            }
+            long metaVal = metaSeg.get(ValueLayout.JAVA_LONG, i * 8);
+            if ((metaVal & 1L) == 1L)
+                continue;
 
-            int loadedTiers = 0;
+            // Gate 2 QEG and loading Tier 0
+            int numLongs0 = tierLongs[0];
             if (qMode == 1) { // 2-bit mode
-                // Gate 2: QEG
-                int numLongs0 = tierLongs[0];
                 long baseOffset0 = i * (numLongs0 * 16L);
-                long t0Sign = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0);
-                long t0Mask = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (numLongs0 * 8L));
-                if ((t0Mask & (1L << 63)) == 0L || (t0Sign & (1L << 63)) == 0L) {
-                    continue; // Early exit
-                }
+                long t0Sign = tier0.get(ValueLayout.JAVA_LONG, baseOffset0);
+                long t0Mask = tier0.get(ValueLayout.JAVA_LONG, baseOffset0 + (numLongs0 * 8L));
+                if ((t0Mask & (1L << 63)) == 0L || (t0Sign & (1L << 63)) == 0L)
+                    continue;
+
                 dbWords[0] = t0Sign;
                 dbMasks[0] = t0Mask;
-                for (int l = 1; l < numLongs0; l++) {
-                    dbWords[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (l * 8));
-                    dbMasks[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (numLongs0 * 8L) + (l * 8));
+                if (numLongs0 > 1) {
+                    MemorySegment.copy(tier0, ValueLayout.JAVA_LONG, baseOffset0 + 8, dbWords, 1, numLongs0 - 1);
+                    MemorySegment.copy(tier0, ValueLayout.JAVA_LONG, baseOffset0 + (numLongs0 * 8L) + 8, dbMasks, 1, numLongs0 - 1);
                 }
-                loadedTiers = 1;
             } else { // 1-bit mode
-                // Gate 2: QEG
-                int numLongs0 = tierLongs[0];
                 long baseOffset0 = i * (numLongs0 * 8L);
-                long t0Val = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0);
-                if ((t0Val & (1L << 63)) == 0L) {
-                    continue; // Early exit
-                }
+                long t0Val = tier0.get(ValueLayout.JAVA_LONG, baseOffset0);
+                if ((t0Val & (1L << 63)) == 0L)
+                    continue;
+
                 dbWords[0] = t0Val;
-                for (int l = 1; l < numLongs0; l++) {
-                    dbWords[l] = tierSegments[0].get(ValueLayout.JAVA_LONG, baseOffset0 + (l * 8));
+                if (numLongs0 > 1) {
+                    MemorySegment.copy(tier0, ValueLayout.JAVA_LONG, baseOffset0 + 8, dbWords, 1, numLongs0 - 1);
                 }
-                loadedTiers = 1;
             }
 
-            int activeCount = numQueries;
+            // Load remaining active tiers up to T
+            if (qMode == 1) { // 2-bit mode
+                for (int tierIdx = 1; tierIdx <= T; tierIdx++) {
+                    int numLongs = tierLongs[tierIdx];
+                    int offset = tierOffsets[tierIdx];
+                    MemorySegment tierSeg = localTiers[tierIdx];
+                    long baseOffset = i * (numLongs * 16L);
+                    MemorySegment.copy(tierSeg, ValueLayout.JAVA_LONG, baseOffset, dbWords, offset, numLongs);
+                    MemorySegment.copy(tierSeg, ValueLayout.JAVA_LONG, baseOffset + (numLongs * 8L), dbMasks, offset, numLongs);
+                }
+            } else { // 1-bit mode
+                for (int tierIdx = 1; tierIdx <= T; tierIdx++) {
+                    int numLongs = tierLongs[tierIdx];
+                    int offset = tierOffsets[tierIdx];
+                    MemorySegment tierSeg = localTiers[tierIdx];
+                    long baseOffset = i * (numLongs * 8L);
+                    MemorySegment.copy(tierSeg, ValueLayout.JAVA_LONG, baseOffset, dbWords, offset, numLongs);
+                }
+            }
+
+            byte maskVal = 0;
             for (int q = 0; q < numQueries; q++) {
-                active[q] = true;
-                accumDists[q] = 0;
-            }
+                int totalDist = 0;
+                boolean earlyExit = false;
 
-            for (int tierIdx = 0; tierIdx <= T; tierIdx++) {
-                if (activeCount == 0) {
-                    break;
-                }
-                int numLongs = tierLongs[tierIdx];
-                int offset = tierOffsets[tierIdx];
-
-                // Load tierIdx on demand if not loaded yet
-                if ((loadedTiers & (1 << tierIdx)) == 0) {
-                    if (qMode == 1) {
-                        long baseOffset = i * (numLongs * 16L);
-                        for (int l = 0; l < numLongs; l++) {
-                            dbWords[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
-                            dbMasks[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (numLongs * 8L) + (l * 8));
-                        }
-                    } else {
-                        long baseOffset = i * (numLongs * 8L);
-                        for (int l = 0; l < numLongs; l++) {
-                            dbWords[offset + l] = tierSegments[tierIdx].get(ValueLayout.JAVA_LONG, baseOffset + (l * 8));
-                        }
-                    }
-                    loadedTiers |= (1 << tierIdx);
-                }
-
-                // Compute distance for all active queries
-                for (int q = 0; q < numQueries; q++) {
-                    if (!active[q]) continue;
-
+                for (int tierIdx = 0; tierIdx <= T; tierIdx++) {
+                    int numLongs = tierLongs[tierIdx];
+                    int offset = tierOffsets[tierIdx];
                     int tierDist = 0;
                     if (qMode == 1) { // 2-bit mode
                         for (int l = 0; l < numLongs; l++) {
@@ -1066,25 +909,19 @@ public class FlatIndex implements Index {
                         }
                     } else { // 1-bit mode
                         for (int l = 0; l < numLongs; l++) {
-                            long qWord = bQueries[q][offset + l];
-                            long dbWord = dbWords[offset + l];
-                            tierDist += Long.bitCount(qWord ^ dbWord);
+                            tierDist += Long.bitCount(bQueries[q][offset + l] ^ dbWords[offset + l]);
                         }
                     }
-                    accumDists[q] += tierDist;
-                    if (accumDists[q] > thresholds[q]) {
-                        active[q] = false;
-                        activeCount--;
+                    totalDist += tierDist;
+
+                    if (totalDist > thresholds[q]) {
+                        earlyExit = true;
+                        break;
                     }
                 }
-            }
 
-            byte maskVal = 0;
-            if (activeCount > 0) {
-                for (int q = 0; q < numQueries; q++) {
-                    if (active[q]) {
-                        maskVal |= (byte) (1 << families[q]);
-                    }
+                if (!earlyExit) {
+                    maskVal |= (byte) (1 << families[q]);
                 }
             }
             localMask.set(ValueLayout.JAVA_BYTE, i, maskVal);
