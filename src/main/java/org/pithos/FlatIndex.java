@@ -315,7 +315,11 @@ public class FlatIndex implements Index {
         for (int k = 0; k < numTiers; k++) {
             int width = tiers[k] - prevBound;
             Path tierPath = Path.of(basePath + "_tier_" + k + ".bin");
-            long bytesPerRecord = (qMode == 1) ? (width / 4) : (width / 8);
+            long bytesPerRecord = switch (qMode) {
+                case 1 -> (width / 4);   // 2-bit ternary
+                case 2 -> (width * 4L);  // Float-Hybrid: raw float32
+                default -> (width / 8);  // 1-bit sign
+            };
             try (FileChannel channel = FileChannel.open(tierPath, StandardOpenOption.READ)) {
                 tierSegments[k] = channel.map(FileChannel.MapMode.READ_ONLY, 0, totalRecords * bytesPerRecord,
                         Arena.global());
@@ -464,6 +468,20 @@ public class FlatIndex implements Index {
                 querySum += val;
             }
 
+            // For QMode 2 (Float-Hybrid), Stage 1 already produced exact L2 distances.
+            // Skip asymmetric reranking; directly resolve record IDs.
+            if (qMode == 2) {
+                List<SearchResult> queryResults = new ArrayList<>();
+                int limit = Math.min(k, candidates.size());
+                for (int i = 0; i < limit; i++) {
+                    long rowIdx = candidates.get(i);
+                    long recordId = UNSAFE.getLong(idsAddr + (rowIdx * 8));
+                    queryResults.add(new SearchResult(recordId, 0));
+                }
+                finalResults[q] = queryResults;
+                return;
+            }
+
             // Rerank candidates using exact asymmetric float-ternary L2 distance
             class RerankedCandidate {
                 final long rowIdx;
@@ -570,6 +588,51 @@ public class FlatIndex implements Index {
             return; // Skip standard Hamming path
         }
         // --- End SIMD Float-L2 dispatch ---
+
+        // --- QMode 2: Float-Hybrid raw bypass ---
+        if (qMode == 2) {
+            // Tier files store raw rotated float32 values (no quantization).
+            // Read them directly off-heap and compute exact VectorAPI L2.
+            float[][] rotQueries = new float[numQueries][];
+            for (int q = 0; q < numQueries; q++) {
+                rotQueries[q] = transformOperator.preconditionAndRotate(queries[q]);
+            }
+            float[] dbFloat = new float[dimension];
+            int dimOffset = 0;
+            for (long i = startIdx; i < endIdx; i++) {
+                long metaVal = UNSAFE.getLong(metadataAddr + (i * 8));
+                if ((metaVal & 1L) == 1L) continue;
+                // Reconstruct full float vector from all tiers
+                dimOffset = 0;
+                for (int tierIdx = 0; tierIdx < numTiers; tierIdx++) {
+                    int startDim = tierIdx == 0 ? 0 : tiers[tierIdx - 1];
+                    int width = tiers[tierIdx] - startDim;
+                    long tAddr = tierAddrs[tierIdx] + i * (width * 4L);
+                    for (int d = 0; d < width; d++) {
+                        dbFloat[dimOffset + d] = Float.intBitsToFloat(UNSAFE.getInt(tAddr + d * 4L));
+                    }
+                    dimOffset += width;
+                }
+                for (int q = 0; q < numQueries; q++) {
+                    float dist = transformOperator.computeL2Float(rotQueries[q], dbFloat);
+                    int iDist = (int) (dist * 1000f);
+                    int[] dists = myDists[q];
+                    long[] ids = myIds[q];
+                    if (iDist < dists[k - 1]) {
+                        int pos = k - 1;
+                        while (pos > 0 && iDist < dists[pos - 1]) {
+                            dists[pos] = dists[pos - 1];
+                            ids[pos] = ids[pos - 1];
+                            pos--;
+                        }
+                        dists[pos] = iDist;
+                        ids[pos] = i;
+                    }
+                }
+            }
+            return;
+        }
+        // --- End QMode 2 dispatch ---
 
         int totalLongs = dimension / 64;
         long[] dbWords = new long[totalLongs];

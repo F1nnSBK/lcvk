@@ -157,7 +157,11 @@ public class VectorDb {
                     StandardOpenOption.WRITE,
                     StandardOpenOption.READ,
                     StandardOpenOption.TRUNCATE_EXISTING);
-            long bytesPerRecord = (qMode == 1) ? (width / 4) : (width / 8);
+            long bytesPerRecord = switch (qMode) {
+                case 1 -> (width / 4);   // 2-bit: 2 bits/dim -> width/4 bytes
+                case 2 -> (width * 4L);  // Float-Hybrid: raw float32 -> 4 bytes/dim
+                default -> (width / 8);  // 1-bit: 1 bit/dim -> width/8 bytes
+            };
             tierMappeds[k] = tierChannels[k].map(FileChannel.MapMode.READ_WRITE, 0, totalRecords * bytesPerRecord, Arena.global());
         }
 
@@ -178,6 +182,20 @@ public class VectorDb {
                         for (int l = 0; l < count; l++) {
                             tierMappeds[k].set(ValueLayout.JAVA_LONG, baseOffset + (l * 8), signPacked[longOffset + l]);
                             tierMappeds[k].set(ValueLayout.JAVA_LONG, baseOffset + (count * 8L) + (l * 8), maskPacked[longOffset + l]);
+                        }
+                        longOffset += count;
+                    }
+                } else if (qMode == 2) { // Float-Hybrid: write raw float32 values
+                    float[] z = transformer.preconditionAndRotate(rec.vector());
+                    int longOffset = 0;
+                    for (int k = 0; k < numTiers; k++) {
+                        int count = tierLongs[k]; // here: dims in this tier
+                        int startDim = (k == 0) ? 0 : tiers[k - 1];
+                        int width = tiers[k] - startDim;
+                        long baseOffset = (long) i * width * 4;
+                        for (int l = 0; l < width; l++) {
+                            int raw = Float.floatToRawIntBits(z[startDim + l]);
+                            tierMappeds[k].set(ValueLayout.JAVA_INT_UNALIGNED, baseOffset + (l * 4), raw);
                         }
                         longOffset += count;
                     }
