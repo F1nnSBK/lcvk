@@ -5,7 +5,7 @@ Dieses Dokument beschreibt die geplante Roadmap zur Erweiterung der Pithos Vekto
 
 ---
 
-## 1. Flexible & konfigurierbare Quantisierungs-Engine
+## 1. Flexible & konfigurierbare Quantisierungs-Engine [UMGESETZT]
 
 Um die Genauigkeit (Recall) flexibel an die Anforderungen der Anwendung anzupassen, soll die Binarisierung von einem sturen 1-Bit-System in eine wählbare Strategie überführt werden. Der Endnutzer entscheidet bei der Initialisierung/Kompilierung des Index über den Modus:
 
@@ -17,8 +17,9 @@ Um die Genauigkeit (Recall) flexibel an die Anforderungen der Anwendung anzupass
   * *Status:* Vollständig implementiert und evaluiert (Stand: 23. Juni 2026).
   * *Funktionsweise:* Codiert pro Dimension zwei Bits, um drei Zustände abzubilden: $-1$, $0$ (Wert nahe Null / Rauschen) und $+1$.
   * *Eignung:* Deutlich höherer Recall, da dimensionale Störsignale (Rauschen) durch den Zustand $0$ maskiert werden. Geringfügiger Rechen-Overhead im Vergleich zu 1-Bit.
-* **MODE_FLOAT_HYBRID (Raw Bypass):**
-  * *Funktionsweise:* Speichert rohe Floats für Dimensionen $D \le 32$ und umgeht die Quantisierung komplett.
+* **MODE_FLOAT_HYBRID (Raw Bypass) [UMGESETZT]:**
+  * *Status:* Vollständig implementiert und evaluiert (Stand: 26. Juni 2026).
+  * *Funktionsweise:* Speichert rohe Floats für Dimensionen $D \le 32$ und umgeht die Quantisierung komplett. Eignung bei extrem kleinen Dimensionen zur Vermeidung von Quantisierungsrauschen.
 
 ### 1.2 API-Entwurf zur Initialisierung (C-Schnittstelle)
 Die Funktion zur Index-Kompilierung wird erweitert, um eine Konfiguration zu übergeben:
@@ -48,7 +49,8 @@ int vdb_compile_index_file_v2(
 
 ---
 
-## 2. Zweistufiges In-Engine Reranking (Hybrid Index)
+## 2. Zweistufiges In-Engine Reranking (Hybrid Index) [UMGESETZT]
+* *Status:* Vollständig implementiert und evaluiert (Stand: 26. Juni 2026).
 
 Um bei großen Dimensionen einen Recall von nahe 100% zu erreichen, implementiert Pithos eine integrierte Nachsortierung direkt auf der C-Ebene (off-heap), ohne den Speicherbus-Vorteil zu verlieren.
 
@@ -69,7 +71,8 @@ graph LR
 
 ---
 
-## 3. Log-Structured Merge Index (Schreibbarer Delta-Puffer)
+## 3. Log-Structured Merge Index (Schreibbarer Delta-Puffer) [UMGESETZT]
+* *Status:* Vollständig implementiert und evaluiert (Stand: 26. Juni 2026).
 
 Um Echtzeit-Inserts zu ermöglichen, ohne das extrem schnelle, lineare Lese-Layout (`mmap`) zu zerstören, wird ein LSM-ähnlicher Ansatz gewählt:
 
@@ -80,7 +83,8 @@ Um Echtzeit-Inserts zu ermöglichen, ohne das extrem schnelle, lineare Lese-Layo
 
 ---
 
-## 4. Dimensions-Adaptive SIMD-Kerne (Vector API)
+## 4. Dimensions-Adaptive SIMD-Kerne (Vector API) [UMGESETZT]
+* *Status:* Vollständig implementiert und evaluiert (Stand: 26. Juni 2026).
 
 Für kleinere Dimensionen ($D \le 32$) verzichtet Pithos künftig auf die Bit-Kompression und nutzt stattdessen direkt die Hardware-SIMD-Register der CPU über die neue **Java 25 Vector API**:
 
@@ -89,3 +93,13 @@ Für kleinere Dimensionen ($D \le 32$) verzichtet Pithos künftig auf die Bit-Ko
   * Bei $D \le 32$ wird ein optimierter Floating-Point-L2-Kernel ausgeführt.
   * Bei $D \ge 64$ greift der Matryoshka-Kaskaden-Hamming-Scan.
 * Dadurch deckt Pithos alle Dimensionen performant ab und schlägt FAISS auch im niedrigen Dimensionsbereich.
+
+---
+
+## 5. Zukünftige Optimierungen (Next Steps)
+
+### 5.1 Write-Ahead-Log (WAL) für den Delta-Buffer
+* **Ziel**: Erhöhung der Ausfallsicherheit (Crash-Resilience) für Echtzeit-Einfügungen.
+* **Problem**: Wenn der Server abstürzt oder der Strom ausfällt, bevor ein In-Memory Delta-Buffer in den Hauptindex geflusht oder manuell per `vdb_backup_delta` serialisiert wird, gehen die ungeschriebenen Daten verloren.
+* **Lösung**: Vor dem tatsächlichen In-Memory Append in den Delta-Buffer wird jeder Schreibvorgang (`vdb_insert` / `vdb_delete`) sequenziell und ungepuffert in ein lokales Write-Ahead-Log (eine Append-only Logdatei auf der Festplatte) geschrieben. Beim Systemstart wird dieses WAL eingelesen, um den unvollständigen Zustand des Delta-Buffers exakt wiederherzustellen. Nach einem erfolgreichen Flush/Merge in den Base-Index wird das WAL wieder geleert bzw. abgeschnitten.
+
