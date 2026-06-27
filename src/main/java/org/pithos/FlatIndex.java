@@ -1028,7 +1028,8 @@ public class FlatIndex implements Index {
         }
 
         ByteBuffer distanceBuffer = ByteBuffer.allocateDirect(numQueries * (int) size * 4);
-        CudaMemoryManager.copyFromDevice(distanceBuffer, hostDistances, numQueries * (int) size * 4);
+        long distanceBufferPtr = CudaMemoryManager.getDirectBufferAddress(distanceBuffer);
+        CudaMemoryManager.copyFromDevice(distanceBufferPtr, hostDistances, numQueries * (int) size * 4);
 
         List<SearchResult>[] results = new List[numQueries];
         for (int q = 0; q < numQueries; q++) {
@@ -1114,7 +1115,8 @@ public class FlatIndex implements Index {
         }
 
         ByteBuffer votingBuffer = ByteBuffer.allocateDirect(size);
-        CudaMemoryManager.copyFromDevice(votingBuffer, deviceVotingMask, size);
+        long votingBufferPtr = CudaMemoryManager.getDirectBufferAddress(votingBuffer);
+        CudaMemoryManager.copyFromDevice(votingBufferPtr, deviceVotingMask, size);
 
         long count = 0;
         for (int i = 0; i < size; i++) {
