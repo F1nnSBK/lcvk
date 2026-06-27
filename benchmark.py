@@ -248,27 +248,42 @@ class PithosMIDB:
         self.lib.vdb_restore_delta.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
         self.lib.vdb_restore_delta.restype = ctypes.c_int
 
-        # CUDA API
-        self.lib.vdb_cuda_is_available.argtypes = [ctypes.c_void_p]
-        self.lib.vdb_cuda_is_available.restype = ctypes.c_int
+        # CUDA API - optional bindings, only available when library is compiled with CUDA support
+        try:
+            self.lib.vdb_cuda_is_available.argtypes = [ctypes.c_void_p]
+            self.lib.vdb_cuda_is_available.restype = ctypes.c_int
+        except AttributeError:
+            self.lib.vdb_cuda_is_available = None
 
-        self.lib.vdb_cuda_init.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        self.lib.vdb_cuda_init.restype = ctypes.c_int
+        try:
+            self.lib.vdb_cuda_init.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            self.lib.vdb_cuda_init.restype = ctypes.c_int
+        except AttributeError:
+            self.lib.vdb_cuda_init = None
 
-        self.lib.vdb_cuda_shutdown.argtypes = [ctypes.c_void_p]
-        self.lib.vdb_cuda_shutdown.restype = ctypes.c_int
+        try:
+            self.lib.vdb_cuda_shutdown.argtypes = [ctypes.c_void_p]
+            self.lib.vdb_cuda_shutdown.restype = ctypes.c_int
+        except AttributeError:
+            self.lib.vdb_cuda_shutdown = None
 
-        self.lib.vdb_cuda_batch_search.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int,
-            ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p
-        ]
-        self.lib.vdb_cuda_batch_search.restype = ctypes.c_int
+        try:
+            self.lib.vdb_cuda_batch_search.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int,
+                ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p
+            ]
+            self.lib.vdb_cuda_batch_search.restype = ctypes.c_int
+        except AttributeError:
+            self.lib.vdb_cuda_batch_search = None
 
-        self.lib.vdb_cuda_query_planetary_grid.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p,
-            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p
-        ]
-        self.lib.vdb_cuda_query_planetary_grid.restype = ctypes.c_longlong
+        try:
+            self.lib.vdb_cuda_query_planetary_grid.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p,
+                ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p
+            ]
+            self.lib.vdb_cuda_query_planetary_grid.restype = ctypes.c_longlong
+        except AttributeError:
+            self.lib.vdb_cuda_query_planetary_grid = None
 
         # Instantiate isolate thread context with suppressed stderr for clean output
         with suppress_stderr():
@@ -620,6 +635,8 @@ class PithosMIDB:
         Returns:
             bool: True if CUDA is available and initialized.
         """
+        if self.lib.vdb_cuda_is_available is None:
+            return False
         with suppress_stderr():
             result = self.lib.vdb_cuda_is_available(self.thread)
         return result != 0
@@ -634,6 +651,8 @@ class PithosMIDB:
         Returns:
             int: 0 on success, non-zero on failure.
         """
+        if self.lib.vdb_cuda_init is None:
+            return -1
         with suppress_stderr():
             return self.lib.vdb_cuda_init(self.thread, device_id)
 
@@ -644,6 +663,8 @@ class PithosMIDB:
         Returns:
             int: 0 on success, non-zero on failure.
         """
+        if self.lib.vdb_cuda_shutdown is None:
+            return -1
         with suppress_stderr():
             return self.lib.vdb_cuda_shutdown(self.thread)
 
@@ -659,6 +680,9 @@ class PithosMIDB:
         Returns:
             Tuple[np.ndarray, np.ndarray]: (IDs, distances) both shaped (num_queries, k).
         """
+        if self.lib.vdb_cuda_batch_search is None:
+            raise RuntimeError("CUDA batch search not available - library compiled without CUDA support")
+        
         num_queries = queries.shape[0]
         out_ids = np.zeros(num_queries * k, dtype=np.int64)
         out_dists = np.zeros(num_queries * k, dtype=np.int32)
@@ -691,6 +715,9 @@ class PithosMIDB:
         Returns:
             int: The total count of matching resonant records.
         """
+        if self.lib.vdb_cuda_query_planetary_grid is None:
+            raise RuntimeError("CUDA planetary grid query not available - library compiled without CUDA support")
+        
         c_index_name = index_name.encode("utf-8")
         query_ptr = queries.ctypes.data_as(ctypes.c_void_p)
         families_ptr = families.ctypes.data_as(ctypes.c_void_p)
