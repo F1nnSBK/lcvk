@@ -141,11 +141,43 @@
                                     <arguments>
                                         <argument>-c</argument>
                                         <argument>pithos_kernels.cu</argument>
+                                        <argument>pithos_cuda_memory.cu</argument>
                                         <argument>-o</argument>
                                         <argument>${project.build.directory}/pithos_kernels.o</argument>
                                         <argument>-O3</argument>
                                         <argument>-arch=sm_80</argument>
+                                        <argument>-arch=sm_86</argument>
+                                        <argument>-arch=sm_89</argument>
+                                        <argument>-arch=sm_90</argument>
                                         <argument>-Xptxas=-v</argument>
+                                        <argument>-I.</argument>
+                                        <argument>-I${project.basedir}/src/main/c</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>compile-cuda-c-files</id>
+                                <phase>compile</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>gcc</executable>
+                                    <workingDirectory>${project.basedir}/src/main/c</workingDirectory>
+                                    <arguments>
+                                        <argument>-c</argument>
+                                        <argument>pithos_cuda.c</argument>
+                                        <argument>pithos_cuda_devicemanager.c</argument>
+                                        <argument>pithos_cuda_memorymanager.c</argument>
+                                        <argument>pithos_cuda_nativebindings.c</argument>
+                                        <argument>pithos_capi_cuda.c</argument>
+                                        <argument>-o</argument>
+                                        <argument>${project.build.directory}/pithos_cuda.o</argument>
+                                        <argument>-I.</argument>
+                                        <argument>-I${project.basedir}/src/main/cuda</argument>
+                                        <argument>-I/usr/local/cuda/include</argument>
+                                        <argument>-fPIC</argument>
+                                        <argument>-O3</argument>
                                     </arguments>
                                 </configuration>
                             </execution>
