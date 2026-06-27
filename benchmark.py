@@ -6,6 +6,7 @@ import ctypes
 import struct
 import argparse
 import resource
+import threading
 import numpy as np
 
 def get_peak_memory_mb():
@@ -94,6 +95,7 @@ class PithosMIDB:
         thread (POINTER(GraalIsolateThread)): Pointer to the active isolate thread context.
     """
     _instance = None
+    _lock = threading.Lock()
 
     def __new__(cls, lib_path=None):
         """
@@ -110,36 +112,37 @@ class PithosMIDB:
         Returns:
             PithosMIDB: The shared singleton instance.
         """
-        if cls._instance is None:
-            instance = super(PithosMIDB, cls).__new__(cls)
-            if lib_path is None:
-                import platform
-                system = platform.system()
-                exts = ["dylib", "so"] if system == "Darwin" else ["so", "dylib"]
-                if system == "Windows":
-                    exts.insert(0, "dll")
+        with cls._lock:
+            if cls._instance is None:
+                instance = super(PithosMIDB, cls).__new__(cls)
+                if lib_path is None:
+                    import platform
+                    system = platform.system()
+                    exts = ["dylib", "so"] if system == "Darwin" else ["so", "dylib"]
+                    if system == "Windows":
+                        exts.insert(0, "dll")
 
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-                dirs = ["target", "build-output", "."]
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                    dirs = ["target", "build-output", "."]
+                    
+                    for ext in exts:
+                        for d in dirs:
+                            candidate_rel = os.path.abspath(os.path.join(base_dir, d, f"libpithos.{ext}"))
+                            if os.path.exists(candidate_rel):
+                                lib_path = candidate_rel
+                                break
+                            candidate_literal = os.path.abspath(os.path.join(d, f"libpithos.{ext}"))
+                            if os.path.exists(candidate_literal):
+                                lib_path = candidate_literal
+                                break
+                        if lib_path:
+                            break
+
+                    if not lib_path:
+                        raise FileNotFoundError("Pithos native shared library not found in target/ or build-output/")
                 
-                for ext in exts:
-                    for d in dirs:
-                        candidate_rel = os.path.abspath(os.path.join(base_dir, d, f"libpithos.{ext}"))
-                        if os.path.exists(candidate_rel):
-                            lib_path = candidate_rel
-                            break
-                        candidate_literal = os.path.abspath(os.path.join(d, f"libpithos.{ext}"))
-                        if os.path.exists(candidate_literal):
-                            lib_path = candidate_literal
-                            break
-                    if lib_path:
-                        break
-
-                if not lib_path:
-                    raise FileNotFoundError("Pithos native shared library not found in target/ or build-output/")
-            
-            instance._init_ffi(lib_path)
-            cls._instance = instance
+                instance._init_ffi(lib_path)
+                cls._instance = instance
         return cls._instance
 
     def __init__(self, lib_path=None):
