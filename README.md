@@ -6,6 +6,8 @@ A high-performance, Ahead-of-Time (AOT) compiled, dimension-agnostic vector sear
 
 Pithos achieves its speed by collapsing abstraction boundaries between language runtimes, the operating system, and hardware execution models. It bypasses garbage collection entirely, mapping memory-bandwidth-bound datasets off-heap using the Java Foreign Function & Memory (FFM) API (Project Panama) and POSIX-aligned virtual memory mapping (`mmap`).
 
+**Now with CUDA acceleration support** for GPU-accelerated Hamming distance computation and multi-family voting, enabling massive parallel search operations on NVIDIA GPUs.
+
 ---
 
 ## Precompiled Native Libraries
@@ -20,10 +22,12 @@ Each release contains:
 
 - `libpithos-linux-x86_64.so` — Linux (x86_64)
 - `libpithos-macos-aarch64.dylib` — macOS (Apple Silicon)
+- `libpithos-linux-x86_64-cuda.so` — Linux (x86_64) with CUDA support
 - `pithos.h` — C API header
 - `graal_isolate.h` — GraalVM Native Image header
+- `pithos_cuda.h` — CUDA C API header (when CUDA profile is enabled)
 
-These binaries can be used directly without installing GraalVM or building the project from source.
+These binaries can be used directly without installing GraalVM or building the project from source. For CUDA acceleration, ensure NVIDIA CUDA Toolkit 12.4+ is installed.
 
 ---
 
@@ -33,14 +37,17 @@ Pithos is built on the premise that the database is a physical extension of the 
 
 ```mermaid
 graph TD
-    classDef main fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
-    classDef step fill:#f1f8e9,stroke:#558b2f,stroke-width:2px;
-    classDef storage fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;
+    classDef input fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000;
+    classDef transform fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000;
+    classDef storage fill:#ffcc80,stroke:#e65100,stroke-width:2px,color:#000;
+    classDef gate fill:#ffcdd2,stroke:#c62828,stroke-width:2px,color:#000;
+    classDef cuda fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#000;
+    classDef output fill:#e1f5fe,stroke:#0277bd,stroke-width:2px,color:#000;
     
-    A[Raw Input Vector x]:::main --> B["Rademacher Preconditioning (z = x ⊙ d)"]:::step
-    B --> C["Sylvester-Hadamard Rotation (H_BD ⊕ Ω_v)"]:::step
-    C --> D["1-Bit Binarization (b = sign(z))"]:::step
-    D --> E["SVD-Driven Spectral Truncation (Energy Budget τ)"]:::step
+    A[Raw Input Vector x]:::input --> B["Rademacher Preconditioning (z = x ⊙ d)"]:::transform
+    B --> C["Sylvester-Hadamard Rotation (H_BD ⊕ Ω_v)"]:::transform
+    C --> D["1-Bit Binarization (b = sign(z))"]:::transform
+    D --> E["SVD-Driven Spectral Truncation (Energy Budget τ)"]:::transform
     
     subgraph Storage Layer [POSIX Off-Heap Columnar Storage]
         F["Tombstone & Validity Mask (metadata.bin)"]:::storage
@@ -51,19 +58,29 @@ graph TD
     E --> G
     
     subgraph Read Path [3-Gate Cascaded Read-Path]
-        H{{"Gate 1: Liveliness Check (T_i == 1 or M_i == 0)"}}:::step
-        I{{"Gate 2: Quantization Entropy Gate (MSB Check)"}}:::step
-        J{{"Gate 3: XOR-Popcount Hamming Cascade"}}:::step
+        H{{"Gate 1: Liveliness Check (T_i == 1 or M_i == 0)"}}:::gate
+        I{{"Gate 2: Quantization Entropy Gate (MSB Check)"}}:::gate
+        J{{"Gate 3: XOR-Popcount Hamming Cascade"}}:::gate
+    end
+    
+    subgraph "CUDA Acceleration Path"
+        J2["GPU Hamming Distance Kernel"]:::cuda
+        M2["Multi-Family Voting Kernel"]:::cuda
+        W2["Walsh-Hadamard Transform Kernel"]:::cuda
     end
     
     F --> H
     G --> I
-    I -- "Early Exit (Flat Terrain)" --> K[Skip Record]:::main
+    I -- "Early Exit (Flat Terrain)" --> K[Skip Record]:::output
     I -- "Pass" --> J
-    J -- "Distance > Threshold" --> L[Skip / Prune Record]:::main
-    J -- "Distance <= Threshold" --> M[Multi-Family Resonant Voting]:::step
+    J -- "Distance > Threshold" --> L[Skip / Prune Record]:::output
+    J -- "Distance <= Threshold" --> M[Multi-Family Resonant Voting]:::transform
+    J -- "CUDA Accelerated" --> J2
+    M -- "CUDA Accelerated" --> M2
     
-    M --> N["Resonant Match (Vote count >= K_vote)"]:::main
+    M --> N["Resonant Match (Vote count >= K_vote)"]:::output
+    J2 --> N
+    M2 --> N
 ```
 
 
@@ -161,13 +178,17 @@ $$\text{popcount}(V_i^{\text{merged}}) \ge K_{\text{vote}} \quad \text{where } K
 
 ```
 .
-├── pom.xml                 # Maven configuration (dimension-agnostic pithos packaging)
+├── pom.xml                 # Maven configuration (dimension-agnostic pithos packaging, CUDA profile)
 ├── Dockerfile              # Multi-stage compile environment with GraalVM JDK 25 and GCC
+├── Dockerfile.cuda        # CUDA-enabled build environment with NVIDIA CUDA Toolkit
 ├── README.md               # This file
 ├── build.sh                # Docker build script (exports compiled Linux library)
 ├── run_benchmark.sh        # One-click benchmark (reproducible results)
+├── reproduce_all.sh        # Reproduce all benchmarks and verification
 ├── test_client.c           # C verification client calling Pithos float C-API
 ├── benchmark.py            # Central Python API Wrapper (PithosMIDB singleton)
+├── pithos.h                # C API header file
+├── graal_isolate.h         # GraalVM Native Image header
 ├── benchmarks/             # All evaluation, sweep, and verification scripts
 │   ├── run_real_verification.py # Lunar Pit / adapter classification pipeline
 │   ├── benchmark_baselines.py   # JIT loop and FAISS baseline comparison
@@ -178,16 +199,27 @@ $$\text{popcount}(V_i^{\text{merged}}) \ge K_{\text{vote}} \quad \text{where } K
 └── src
 
     ├── main
-    │   └── java
-    │       └── org
-    │           └── pithos
-    │               ├── CApi.java           # GraalVM Native C FFI Bridge Entrypoints
-    │               ├── DistanceMetric.java # Unrolled popcount Hamming calculations
-    │               ├── FlatIndex.java      # Multi-tier Disruptor- & Unsafe-optimized index
-    │               ├── Index.java          # Core Index interface
-    │               ├── TransformOperator.java# Jacobi SVD, Rademacher preconditioning & block FWHT
-    │               ├── VectorDb.java       # DB manager and multi-tier index compiler
-    │               └── VectorRecord.java   # Dimension-agnostic record representation
+    │   ├── java
+    │   │   └── org
+    │   │       └── pithos
+    │   │           ├── CApi.java           # GraalVM Native C FFI Bridge Entrypoints
+    │   │           ├── CudaDeviceManager.java # CUDA device management and availability
+    │   │           ├── CudaNativeBindings.java # JNI bindings for CUDA native functions
+    │   │           ├── DistanceMetric.java # Unrolled popcount Hamming calculations
+    │   │           ├── FlatIndex.java      # Multi-tier Disruptor- & Unsafe-optimized index
+    │   │           ├── Index.java          # Core Index interface
+    │   │           ├── TransformOperator.java# Jacobi SVD, Rademacher preconditioning & block FWHT
+    │   │           ├── VectorDb.java       # DB manager and multi-tier index compiler
+    │   │           └── VectorRecord.java   # Dimension-agnostic record representation
+    │   ├── c
+    │   │   ├── pithos_cuda.c              # CUDA C wrapper functions
+    │   │   ├── pithos_cuda_devicemanager.c # CUDA device management
+    │   │   ├── pithos_cuda_memorymanager.c # CUDA memory management
+    │   │   ├── pithos_cuda_nativebindings.c # CUDA native bindings
+    │   │   └── pithos_capi_cuda.c         # CUDA JNI entry points
+    │   └── cuda
+    │       ├── pithos_kernels.cu          # CUDA kernels (Hamming, voting, transform)
+    │       └── pithos_cuda_memory.cu      # CUDA memory management kernels
     └── test
         └── java
             └── org
@@ -202,6 +234,8 @@ $$\text{popcount}(V_i^{\text{merged}}) \ge K_{\text{vote}} \quad \text{where } K
 To demonstrate how Pithos collapses abstraction boundaries and runs GC-free:
 - **[ZeroCostDemo.java](file:///Users/finnhertsch/projects/lcvk/examples/java/ZeroCostDemo.java):** Showcases off-heap virtual memory mapping via Java 25 Foreign Function & Memory (FFM) API memory segments and ValueLayout access, avoiding GC overhead.
 - **[demo.c](file:///Users/finnhertsch/projects/lcvk/examples/cpp/demo.c):** Demonstrates how to link `libpithos` and invoke the engine natively from C/C++.
+
+For CUDA-enabled demos, see the CUDA-specific entry points in **[CApi.java](src/main/java/org/pithos/CApi.java)** (lines 906-1009).
 
 The compiled native library exposes the following dynamic C interfaces:
 
@@ -222,7 +256,10 @@ int vdb_load_index_with_weights(graal_isolatethead_t* thread, char* name, char* 
 int vdb_get_info(graal_isolatethead_t* thread, char* indexName, int* outDimension, long long* outSize, char* outPlanetId, long long* outPlanetRadius, int* outTiersCount);
 
 // Compiles raw float records into a multi-tier database file layout with configurable quantization (qMode: 0=1-bit, 1=2-bit, 2=FP32 bypass)
-int vdb_compile_index_file(graal_isolatethead_t* thread, char* path, byte planetId, long long planetRadius, int dimension, int* tiers, int numTiers, long long* ids, float* vectors, int numRecords, int qMode);
+int vdb_compile_index_file(graal_isolatethead_t* thread, char* path, char planetId, long long planetRadius, int dimension, int* tiers, int numTiers, long long* ids, float* vectors, int numRecords, int qMode);
+
+// Compiles with additional mode parameter for extended quantization options
+int vdb_compile_index_file_v2(graal_isolatethead_t* thread, char* path, char planetId, long long planetRadius, int dimension, int* tiers, int numTiers, long long* ids, float* vectors, int numRecords, int qMode, int mode);
 
 // Retrieves the raw off-heap virtual memory address and length of a specific index tier (FPGA/DMA direct access)
 int vdb_get_tier_address(graal_isolatethead_t* thread, char* indexName, int tierIdx, long long* outAddress, long long* outLength);
@@ -276,8 +313,27 @@ int vdb_search_merged(graal_isolatethead_t* thread, char* indexName, float* quer
 // Backups/flushes the current delta buffer state into a binary backup file
 int vdb_backup_delta(graal_isolatethead_t* thread, char* indexName, char* backupPath);
 
-// Restores delta buffer state from a binary backup file
-int vdb_restore_delta(graal_isolatethead_t* thread, char* indexName, char* backupPath);
+// Restores delta buffer state from a binary backup file (with mode parameter)
+int vdb_restore_delta(graal_isolatethead_t* thread, char* indexName, char* backupPath, int mode);
+
+// ====================================================================
+// CUDA Acceleration Functions
+// ====================================================================
+
+// Initializes CUDA with specified device ID
+int vdb_cuda_init(graal_isolatethread_t* thread, int deviceId);
+
+// Shuts down CUDA resources
+int vdb_cuda_shutdown(graal_isolatethread_t* thread);
+
+// Checks if CUDA is available (returns 1 if available, 0 otherwise)
+int vdb_cuda_is_available(graal_isolatethread_t* thread);
+
+// Performs CUDA-accelerated batch search
+int vdb_cuda_batch_search(graal_isolatethread_t* thread, char* indexName, float* queries, int numQueries, int k, long long* outIds, int* outDistances);
+
+// Performs CUDA-accelerated multi-family resonant voting
+long long vdb_cuda_query_planetary_grid(graal_isolatethread_t* thread, char* indexName, float* queries, int* queryFamilies, int* queryThresholds, int numQueries, char* votingMask);
 ```
 
 ### C-API Configuration Guide
@@ -302,6 +358,15 @@ When you compile an index, Pithos automatically exports the raw vectors in IEEE 
 Pithos is specifically designed for hybrid CPU-FPGA/GPU acceleration workflows, where the host CPU handles the application orchestration and the hardware accelerator performs massive Hamming sweeps:
 - **Zero-Copy DMA Acceleration (`vdb_get_tier_address`)**: Custom PCIe hardware kernels or FPGA DMA controllers can retrieve the exact virtual off-heap memory-mapped address and length of specific tier buffers. Because these buffers are read-only, cache-aligned, and contiguous, they can be streamed directly into custom acceleration engines via DMA, bypassing Java GC, JVM boundaries, and CPU overhead.
 - **Asymmetric Vector Offloading (`vdb_transform_and_quantize`)**: A host system can quickly transform and binarize incoming query vectors on the CPU using Pithos's Rademacher preconditioning and Walsh-Hadamard rotations. The resulting query bit vectors can then be passed to the FPGA/GPU to perform low-latency binary Hamming distance sweeps directly against the raw off-heap database buffers.
+
+#### 5. CUDA GPU Acceleration
+Pithos now includes native CUDA support for GPU-accelerated operations:
+- **CUDA Hamming Distance Kernels**: Parallel computation of Hamming distances across thousands of threads for massive batch search operations.
+- **Multi-Family Voting Kernel**: GPU-accelerated resonant voting for planetary-scale anomaly detection.
+- **Walsh-Hadamard Transform Kernel**: GPU-accelerated transformation of query vectors.
+- **Zero-Copy Memory Mapping**: Database tiers are mapped to GPU memory via CUDA pointers, enabling direct GPU access without CPU-GPU memory transfers.
+
+To enable CUDA support, build with the `-Pcuda` Maven profile. See the [Dockerfile.cuda](Dockerfile.cuda) for a complete CUDA build environment.
 
 
 ---
@@ -376,6 +441,30 @@ Runs the full Lunar Pit / DINOv3 + Lunar LoRA pipeline, ingests raw float vector
 ```
 
 Runs both the FAISS Flat Index L2 baseline and a simulated single-threaded JIT sequential scan over the actual 1,000,000 replicated lunar vector database, saving baseline results to `baselines_metrics.json`.
+
+### 5. Building with CUDA Support (Linux)
+
+Pithos supports GPU acceleration via CUDA. To build with CUDA support:
+
+```bash
+# Using Docker (recommended)
+docker build -t pithos-cuda -f Dockerfile.cuda .
+docker run --gpus all -it pithos-cuda
+
+# Or build manually on a CUDA-enabled system
+export JAVA_HOME=/path/to/graalvm
+export PATH=$JAVA_HOME/bin:$PATH
+export CUDA_HOME=/usr/local/cuda
+export PATH=$CUDA_HOME/bin:$PATH
+mvn clean package -Pcuda -Dcuda.enabled=true
+```
+
+This builds `libpithos.so` with CUDA kernel support, including:
+- Batch Hamming distance computation kernels
+- Multi-family voting kernels
+- Walsh-Hadamard transform kernels
+
+Note: CUDA support requires NVIDIA CUDA Toolkit 12.4+ and a compatible NVIDIA GPU.
 
 ---
 
