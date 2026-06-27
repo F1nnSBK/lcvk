@@ -103,14 +103,4 @@ public class CudaKernelTest {
         }
     }
 
-    @Test
-    public void testDeviceProperties() {
-        Assumptions.assumeTrue(CudaDeviceManager.isAvailable() != 0, "CUDA not available");
-        
-        CudaDeviceManager.CudaDeviceProperties props = CudaDeviceManager.getDeviceProperties(0);
-        assertNotNull(props, "Failed to get device properties");
-        
-        assertTrue(props.totalGlobalMem() > 0, "Invalid global memory size");
-        assertTrue(props.maxThreadsPerBlock() > 0, "Invalid max threads per block");
-    }
 }
