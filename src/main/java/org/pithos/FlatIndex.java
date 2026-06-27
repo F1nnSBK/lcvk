@@ -985,7 +985,8 @@ public class FlatIndex implements Index {
         for (int i = 0; i < tierVectors.length; i++) {
             ByteBuffer tierBuffer = tierVectors[i];
             deviceTierBuffers[i] = CudaMemoryManager.allocDevice(tierBuffer.capacity());
-            CudaMemoryManager.copyToDevice(deviceTierBuffers[i], tierBuffer, tierBuffer.capacity());
+            long hostPtr = CudaMemoryManager.getDirectBufferAddress(tierBuffer);
+            CudaMemoryManager.copyToDevice(deviceTierBuffers[i], hostPtr, tierBuffer.capacity());
         }
         cudaInitialized = true;
     }
@@ -1011,7 +1012,8 @@ public class FlatIndex implements Index {
         }
         queryBuffer.rewind();
 
-        CudaMemoryManager.copyToDevice(deviceQueries, queryBuffer, numQueries * dimension * 4);
+        long queryBufferPtr = CudaMemoryManager.getDirectBufferAddress(queryBuffer);
+        CudaMemoryManager.copyToDevice(deviceQueries, queryBufferPtr, numQueries * dimension * 4);
 
         int status = pithos_cuda_launch_batch_hamming(
             deviceTierBuffers, deviceQueries, hostDistances,
@@ -1086,9 +1088,13 @@ public class FlatIndex implements Index {
         }
         thresholdsBuffer.rewind();
 
-        CudaMemoryManager.copyToDevice(deviceQueries, queryBuffer, numQueries * dimension * 4);
-        CudaMemoryManager.copyToDevice(deviceFamilies, familiesBuffer, numQueries * 4);
-        CudaMemoryManager.copyToDevice(deviceThresholds, thresholdsBuffer, numQueries * 4);
+        long queryBufferPtr = CudaMemoryManager.getDirectBufferAddress(queryBuffer);
+        long familiesBufferPtr = CudaMemoryManager.getDirectBufferAddress(familiesBuffer);
+        long thresholdsBufferPtr = CudaMemoryManager.getDirectBufferAddress(thresholdsBuffer);
+        
+        CudaMemoryManager.copyToDevice(deviceQueries, queryBufferPtr, numQueries * dimension * 4);
+        CudaMemoryManager.copyToDevice(deviceFamilies, familiesBufferPtr, numQueries * 4);
+        CudaMemoryManager.copyToDevice(deviceThresholds, thresholdsBufferPtr, numQueries * 4);
 
         int status = pithos_cuda_launch_voting(
             deviceTierBuffers, deviceQueries, deviceFamilies, deviceThresholds,

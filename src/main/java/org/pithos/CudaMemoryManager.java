@@ -64,7 +64,7 @@ public class CudaMemoryManager {
         freeDevice(deviceBuffer);
     }
 
-    private static native long getDirectBufferAddress(ByteBuffer buffer);
+    public static native long getDirectBufferAddress(ByteBuffer buffer);
     private static native int copyToDeviceAsync(long dst, long src, long size, long stream);
     private static native int copyFromDeviceAsync(long dst, long src, long size, long stream);
     private static native int streamSynchronize(long stream);
