@@ -98,15 +98,6 @@ def main():
     ax2.plot(x, y_reduction, color=color_reduction, marker='s', linestyle='--', linewidth=2, label='Workload Reduction')
     ax2.tick_params(axis='y', labelcolor=color_reduction)
     
-    # Highlight the Elbow point (K=500)
-    ax1.annotate('Optimal Elbow\n(99.5% Workload Reduction\n& 68.3% Recall)',
-                 xy=(500, 68.35),
-                 xytext=(300, 45),
-                 arrowprops=dict(facecolor='#00f5a0', shrink=0.08, width=1.5, headwidth=6),
-                 color='#00f5a0',
-                 fontsize=9,
-                 bbox=dict(boxstyle="round,pad=0.3", fc="#161b22", ec="#30363d", lw=1))
-    
     plt.title('Downstream Workload Reduction vs. Target Recall Trade-Off', color='#c9d1d9', fontsize=12, pad=15)
     plt.grid(True, color='#21262d', linestyle=':', alpha=0.6)
     
