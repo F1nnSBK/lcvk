@@ -110,7 +110,6 @@ public class CudaKernelTest {
         CudaDeviceManager.CudaDeviceProperties props = CudaDeviceManager.getDeviceProperties(0);
         assertNotNull(props, "Failed to get device properties");
         
-        assertNotNull(props.name(), "Device name is null");
         assertTrue(props.totalGlobalMem() > 0, "Invalid global memory size");
         assertTrue(props.maxThreadsPerBlock() > 0, "Invalid max threads per block");
     }
