@@ -10,14 +10,11 @@ public class CudaDeviceManager {
 
     @CStruct("cudaDeviceProp")
     public interface CudaDeviceProperties extends PointerBase {
-        @CField("name") String name();
         @CField("totalGlobalMem") long totalGlobalMem();
         @CField("sharedMemPerBlock") long sharedMemPerBlock();
         @CField("regsPerBlock") int regsPerBlock();
         @CField("warpSize") int warpSize();
         @CField("maxThreadsPerBlock") int maxThreadsPerBlock();
-        @CField("maxThreadsDim") int[] maxThreadsDim();
-        @CField("maxGridSize") int[] maxGridSize();
         @CField("clockRate") int clockRate();
         @CField("totalConstMem") long totalConstMem();
         @CField("major") int major();
