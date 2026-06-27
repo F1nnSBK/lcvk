@@ -1,0 +1,54 @@
+#include "pithos_cuda.h"
+
+JNIEXPORT jint JNICALL Java_org_pithos_CudaNativeBindings_pithos_1cuda_1launch_1batch_1hamming(
+    JNIEnv* env,
+    jclass clazz,
+    jlongArray deviceTierBuffers,
+    jlong deviceQueries,
+    jlong hostDistances,
+    jint numDbVectors,
+    jint numQueries,
+    jint numTiers,
+    jintArray tierOffsets,
+    jintArray tierSizes
+) {
+    jlong* buffers = (*env)->GetLongArrayElements(env, deviceTierBuffers, NULL);
+    jint* offsets = (*env)->GetIntArrayElements(env, tierOffsets, NULL);
+    jint* sizes = (*env)->GetIntArrayElements(env, tierSizes, NULL);
+    
+    int result = pithos_cuda_launch_batch_hamming(
+        buffers, deviceQueries, hostDistances,
+        numDbVectors, numQueries, numTiers, offsets, sizes
+    );
+    
+    (*env)->ReleaseLongArrayElements(env, deviceTierBuffers, buffers, JNI_ABORT);
+    (*env)->ReleaseIntArrayElements(env, tierOffsets, offsets, JNI_ABORT);
+    (*env)->ReleaseIntArrayElements(env, tierSizes, sizes, JNI_ABORT);
+    
+    return result;
+}
+
+JNIEXPORT jint JNICALL Java_org_pithos_CudaNativeBindings_pithos_1cuda_1launch_1voting(
+    JNIEnv* env,
+    jclass clazz,
+    jlongArray deviceTierBuffers,
+    jlong deviceQueries,
+    jlong deviceFamilies,
+    jlong deviceThresholds,
+    jlong deviceVotingMask,
+    jint numDbVectors,
+    jint numQueries,
+    jint numFamilies,
+    jint numWordsPerVector
+) {
+    jlong* buffers = (*env)->GetLongArrayElements(env, deviceTierBuffers, NULL);
+    
+    long result = pithos_cuda_launch_voting(
+        buffers, deviceQueries, deviceFamilies, deviceThresholds,
+        deviceVotingMask, numDbVectors, numQueries, numFamilies, numWordsPerVector
+    );
+    
+    (*env)->ReleaseLongArrayElements(env, deviceTierBuffers, buffers, JNI_ABORT);
+    
+    return (jint)result;
+}

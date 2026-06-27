@@ -100,3 +100,25 @@ int pithos_cuda_launch_voting(
         num_db_vectors, num_queries, num_families, num_words_per_vector, default_stream
     );
 }
+
+int pithos_cuda_copy_to_device_async(void* dst, void* src, size_t size, void* stream) {
+    return cuda_copy_to_device_async(dst, src, size, *(cudaStream_t*)stream);
+}
+
+int pithos_cuda_copy_from_device_async(void* dst, void* src, size_t size, void* stream) {
+    return cuda_copy_from_device_async(dst, src, size, *(cudaStream_t*)stream);
+}
+
+int pithos_cuda_stream_synchronize(void* stream) {
+    return cuda_stream_synchronize(*(cudaStream_t*)stream);
+}
+
+int cuda_create_stream(void** stream) {
+    cudaStream_t* s = (cudaStream_t*)malloc(sizeof(cudaStream_t));
+    if (cudaStreamCreate(s) != cudaSuccess) {
+        free(s);
+        return -1;
+    }
+    *stream = s;
+    return 0;
+}

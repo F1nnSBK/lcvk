@@ -44,6 +44,14 @@ int pithos_cuda_launch_voting(
     int num_words_per_vector
 );
 
+// Async operations
+int pithos_cuda_copy_to_device_async(void* dst, void* src, size_t size, void* stream);
+int pithos_cuda_copy_from_device_async(void* dst, void* src, size_t size, void* stream);
+int pithos_cuda_stream_synchronize(void* stream);
+
+// Stream management
+int cuda_create_stream(void** stream);
+
 #ifdef __cplusplus
 }
 #endif
