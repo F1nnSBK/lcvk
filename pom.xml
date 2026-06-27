@@ -104,9 +104,6 @@
                         <buildArg>-J-Xmx5g</buildArg>
                         <buildArg>-O3</buildArg>
                         <buildArg>-march=native</buildArg>
-                        <buildArg>-lcuda</buildArg>
-                        <buildArg>-lcudart</buildArg>
-                        <buildArg>-L/usr/local/cuda/lib64</buildArg>
                     </buildArgs>
                 </configuration>
             </plugin>
@@ -182,6 +179,29 @@
                                 </configuration>
                             </execution>
                         </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.graalvm.buildtools</groupId>
+                        <artifactId>native-maven-plugin</artifactId>
+                        <version>${native.maven.plugin.version}</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <sharedLibrary>true</sharedLibrary>
+                            <imageName>pithos</imageName>
+                            <buildArgs>
+                                <buildArg>--no-fallback</buildArg>
+                                <buildArg>--add-modules=jdk.incubator.vector</buildArg>
+                                <buildArg>-H:+UnlockExperimentalVMOptions</buildArg>
+                                <buildArg>-H:+VectorAPISupport</buildArg>
+                                <buildArg>--parallelism=3</buildArg>
+                                <buildArg>-J-Xmx5g</buildArg>
+                                <buildArg>-O3</buildArg>
+                                <buildArg>-march=native</buildArg>
+                                <buildArg>-lcuda</buildArg>
+                                <buildArg>-lcudart</buildArg>
+                                <buildArg>-L/usr/local/cuda/lib64</buildArg>
+                            </buildArgs>
+                        </configuration>
                     </plugin>
                 </plugins>
             </build>
