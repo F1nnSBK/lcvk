@@ -6,15 +6,6 @@ public class CudaMemoryManager {
 
     private static final int DEFAULT_STREAM_COUNT = 4;
 
-    public static native long allocPinned(long size);
-    public static native void freePinned(long pointer);
-    public static native long allocDevice(long size);
-    public static native void freeDevice(long pointer);
-    public static native int copyToDevice(long dst, long src, long size);
-    public static native int copyFromDevice(long dst, long src, long size);
-    public static native long createStream();
-    public static native void destroyStream(long stream);
-
     private final long[] streams;
     private final long pinnedBuffer;
     private final long deviceBuffer;
@@ -29,6 +20,15 @@ public class CudaMemoryManager {
         this.pinnedBuffer = allocPinned(bufferSize);
         this.deviceBuffer = allocDevice(bufferSize);
     }
+
+    public static native long allocPinned(long size);
+    public static native void freePinned(long pointer);
+    public static native long allocDevice(long size);
+    public static native void freeDevice(long pointer);
+    public static native int copyToDevice(long dst, long src, long size);
+    public static native int copyFromDevice(long dst, long src, long size);
+    public static native long createStream();
+    public static native void destroyStream(long stream);
 
     public void asyncTransferToDevice(ByteBuffer hostBuffer, long devicePtr, int streamIndex) {
         long size = hostBuffer.remaining();

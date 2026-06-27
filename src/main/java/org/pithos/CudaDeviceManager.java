@@ -34,4 +34,12 @@ public class CudaDeviceManager {
     public static native int isAvailable();
     public static native int getDeviceCount();
     public static native CudaDeviceProperties getDeviceProperties(int deviceId);
+
+    @CStruct("cudaPointerAttributes")
+    public interface CudaPointerAttributes extends PointerBase {
+        @CField("type") int type();
+        @CField("device") int device();
+        @CField("devicePointer") long devicePointer();
+        @CField("hostPointer") long hostPointer();
+    }
 }

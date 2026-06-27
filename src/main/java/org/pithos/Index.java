@@ -30,6 +30,24 @@ public interface Index extends AutoCloseable {
      */
     long queryPlanetaryGrid(float[][] queries, int[] families, int[] thresholds, java.lang.foreign.MemorySegment votingMask);
 
+    // =========================================================================
+    // CUDA Acceleration Methods
+    // =========================================================================
+
+    /**
+     * Performs a CUDA-accelerated batch search for multiple queries.
+     */
+    default List<SearchResult>[] cudaBatchSearch(float[][] queries, int k) {
+        return batchSearch(queries, k);
+    }
+
+    /**
+     * Performs a CUDA-accelerated planetary grid query.
+     */
+    default long cudaQueryPlanetaryGrid(float[][] queries, int[] families, int[] thresholds, java.lang.foreign.MemorySegment votingMask) {
+        return queryPlanetaryGrid(queries, families, thresholds, votingMask);
+    }
+
     /**
      * Gets the vector dimension of the index.
      */

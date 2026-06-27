@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -12,6 +13,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.HashSet;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadFactory;
 import java.util.stream.IntStream;
@@ -962,5 +965,188 @@ public class FlatIndex implements Index {
                 // ignore
             }
         }
+    }
+
+    // =========================================================================
+    // CUDA Acceleration Implementation
+    // =========================================================================
+
+    private static final int GPU_BATCH_THRESHOLD = 100;
+    private static final int MIN_DIMENSION_FOR_GPU = 64;
+
+    private long[] deviceTierBuffers;
+    private boolean cudaInitialized = false;
+
+    private void ensureCudaInitialized() {
+        if (cudaInitialized || !CudaDeviceManager.isAvailable() != 0) {
+            return;
+        }
+        deviceTierBuffers = new long[tierVectors.length];
+        for (int i = 0; i < tierVectors.length; i++) {
+            ByteBuffer tierBuffer = tierVectors[i];
+            deviceTierBuffers[i] = CudaMemoryManager.allocDevice(tierBuffer.capacity());
+            CudaMemoryManager.copyToDevice(deviceTierBuffers[i], tierBuffer, tierBuffer.capacity());
+        }
+        cudaInitialized = true;
+    }
+
+    @Override
+    public List<SearchResult>[] cudaBatchSearch(float[][] queries, int k) {
+        if (queries.length < GPU_BATCH_THRESHOLD || dimension < MIN_DIMENSION_FOR_GPU) {
+            return batchSearch(queries, k);
+        }
+
+        ensureCudaInitialized();
+
+        int numQueries = queries.length;
+        int numWordsPerVector = (dimension + 63) / 64;
+
+        long hostQueries = CudaMemoryManager.allocPinned(numQueries * dimension * 4);
+        long deviceQueries = CudaMemoryManager.allocDevice(numQueries * dimension * 4);
+        long hostDistances = CudaMemoryManager.allocPinned(numQueries * size * 4);
+
+        ByteBuffer queryBuffer = ByteBuffer.allocateDirect(numQueries * dimension * 4);
+        for (float[] query : queries) {
+            queryBuffer.putFloat(query[0]);
+        }
+        queryBuffer.rewind();
+
+        CudaMemoryManager.copyToDevice(deviceQueries, queryBuffer, numQueries * dimension * 4);
+
+        int status = pithos_cuda_launch_batch_hamming(
+            deviceTierBuffers, deviceQueries, hostDistances,
+            (int) size, numQueries, tierVectors.length, tierOffsets, tierSizes
+        );
+
+        if (status != 0) {
+            CudaMemoryManager.freePinned(hostQueries);
+            CudaMemoryManager.freeDevice(deviceQueries);
+            CudaMemoryManager.freePinned(hostDistances);
+            return batchSearch(queries, k);
+        }
+
+        ByteBuffer distanceBuffer = ByteBuffer.allocateDirect(numQueries * (int) size * 4);
+        CudaMemoryManager.copyFromDevice(distanceBuffer, hostDistances, numQueries * (int) size * 4);
+
+        List<SearchResult>[] results = new List[numQueries];
+        for (int q = 0; q < numQueries; q++) {
+            List<SearchResult> queryResults = new ArrayList<>(k);
+            for (int i = 0; i < size && i < k; i++) {
+                int distance = distanceBuffer.getInt(q * (int) size + i);
+                queryResults.add(new SearchResult(i, distance));
+            }
+            results[q] = queryResults;
+        }
+
+        CudaMemoryManager.freePinned(hostQueries);
+        CudaMemoryManager.freeDevice(deviceQueries);
+        CudaMemoryManager.freePinned(hostDistances);
+
+        return results;
+    }
+
+    @Override
+    public long cudaQueryPlanetaryGrid(float[][] queries, int[] families, int[] thresholds, MemorySegment votingMask) {
+        if (queries.length < GPU_BATCH_THRESHOLD || dimension < MIN_DIMENSION_FOR_GPU) {
+            return queryPlanetaryGrid(queries, families, thresholds, votingMask);
+        }
+
+        ensureCudaInitialized();
+
+        int numQueries = queries.length;
+        int numWordsPerVector = (dimension + 63) / 64;
+        int numFamilies = families.length;
+
+        long hostQueries = CudaMemoryManager.allocPinned(numQueries * dimension * 4);
+        long deviceQueries = CudaMemoryManager.allocDevice(numQueries * dimension * 4);
+        long hostFamilies = CudaMemoryManager.allocPinned(numQueries * 4);
+        long deviceFamilies = CudaMemoryManager.allocDevice(numQueries * 4);
+        long hostThresholds = CudaMemoryManager.allocPinned(numQueries * 4);
+        long deviceThresholds = CudaMemoryManager.allocDevice(numQueries * 4);
+        long hostVotingMask = CudaMemoryManager.allocPinned(size);
+        long deviceVotingMask = CudaMemoryManager.allocDevice(size);
+
+        ByteBuffer queryBuffer = ByteBuffer.allocateDirect(numQueries * dimension * 4);
+        for (float[] query : queries) {
+            for (float val : query) {
+                queryBuffer.putFloat(val);
+            }
+        }
+        queryBuffer.rewind();
+
+        ByteBuffer familiesBuffer = ByteBuffer.allocateDirect(numQueries * 4);
+        for (int family : families) {
+            familiesBuffer.putInt(family);
+        }
+        familiesBuffer.rewind();
+
+        ByteBuffer thresholdsBuffer = ByteBuffer.allocateDirect(numQueries * 4);
+        for (int threshold : thresholds) {
+            thresholdsBuffer.putInt(threshold);
+        }
+        thresholdsBuffer.rewind();
+
+        CudaMemoryManager.copyToDevice(deviceQueries, queryBuffer, numQueries * dimension * 4);
+        CudaMemoryManager.copyToDevice(deviceFamilies, familiesBuffer, numQueries * 4);
+        CudaMemoryManager.copyToDevice(deviceThresholds, thresholdsBuffer, numQueries * 4);
+
+        int status = pithos_cuda_launch_voting(
+            deviceTierBuffers, deviceQueries, deviceFamilies, deviceThresholds,
+            deviceVotingMask, (int) size, numQueries, numFamilies, numWordsPerVector
+        );
+
+        if (status != 0) {
+            CudaMemoryManager.freePinned(hostQueries);
+            CudaMemoryManager.freeDevice(deviceQueries);
+            CudaMemoryManager.freePinned(hostFamilies);
+            CudaMemoryManager.freeDevice(deviceFamilies);
+            CudaMemoryManager.freePinned(hostThresholds);
+            CudaMemoryManager.freeDevice(deviceThresholds);
+            CudaMemoryManager.freePinned(hostVotingMask);
+            CudaMemoryManager.freeDevice(deviceVotingMask);
+            return queryPlanetaryGrid(queries, families, thresholds, votingMask);
+        }
+
+        ByteBuffer votingBuffer = ByteBuffer.allocateDirect(size);
+        CudaMemoryManager.copyFromDevice(votingBuffer, deviceVotingMask, size);
+
+        long count = 0;
+        for (int i = 0; i < size; i++) {
+            if (votingBuffer.get(i) != 0) {
+                count++;
+                votingMask.setAtIndex(ValueLayout.JAVA_BYTE, i, votingBuffer.get(i));
+            }
+        }
+
+        CudaMemoryManager.freePinned(hostQueries);
+        CudaMemoryManager.freeDevice(deviceQueries);
+        CudaMemoryManager.freePinned(hostFamilies);
+        CudaMemoryManager.freeDevice(deviceFamilies);
+        CudaMemoryManager.freePinned(hostThresholds);
+        CudaMemoryManager.freeDevice(deviceThresholds);
+        CudaMemoryManager.freePinned(hostVotingMask);
+        CudaMemoryManager.freeDevice(deviceVotingMask);
+
+        return count;
+    }
+
+    private static int pithos_cuda_launch_batch_hamming(
+        long[] deviceTierBuffers, long deviceQueries, long hostDistances,
+        int numDbVectors, int numQueries, int numTiers, int[] tierOffsets, int[] tierSizes
+    ) {
+        return CudaNativeBindings.pithos_cuda_launch_batch_hamming(
+            deviceTierBuffers, deviceQueries, hostDistances,
+            numDbVectors, numQueries, numTiers, tierOffsets, tierSizes
+        );
+    }
+
+    private static int pithos_cuda_launch_voting(
+        long[] deviceTierBuffers, long deviceQueries, long deviceFamilies, long deviceThresholds,
+        long deviceVotingMask, int numDbVectors, int numQueries, int numFamilies, int numWordsPerVector
+    ) {
+        return CudaNativeBindings.pithos_cuda_launch_voting(
+            deviceTierBuffers, deviceQueries, deviceFamilies, deviceThresholds,
+            deviceVotingMask, numDbVectors, numQueries, numFamilies, numWordsPerVector
+        );
     }
 }

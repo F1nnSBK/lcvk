@@ -898,4 +898,113 @@ public class CApi {
             return -4;
         }
     }
+
+    // =========================================================================
+    // CUDA Acceleration C-API
+    // =========================================================================
+
+    @CEntryPoint(name = "vdb_cuda_init")
+    public static int cudaInit(IsolateThread thread, int deviceId) {
+        if (db == null) return -1;
+        try {
+            return db.cudaInit(deviceId);
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    @CEntryPoint(name = "vdb_cuda_shutdown")
+    public static int cudaShutdown(IsolateThread thread) {
+        if (db == null) return -1;
+        try {
+            db.cudaShutdown();
+            return 0;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    @CEntryPoint(name = "vdb_cuda_is_available")
+    public static int cudaIsAvailable(IsolateThread thread) {
+        if (db == null) return 0;
+        return db.cudaIsAvailable() ? 1 : 0;
+    }
+
+    @CEntryPoint(name = "vdb_cuda_batch_search")
+    public static int cudaBatchSearch(IsolateThread thread, CCharPointer indexName, CFloatPointer queries, int numQueries,
+            int k, CLongPointer outIds, CIntPointer outDistances) {
+        if (db == null) return -1;
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            Index index = db.getIndex(idxName);
+            if (index == null) return -2;
+
+            int dim = index.getDimension();
+            float[][] javaQueries = new float[numQueries][dim];
+            for (int q = 0; q < numQueries; q++) {
+                for (int j = 0; j < dim; j++) {
+                    javaQueries[q][j] = queries.read(q * dim + j);
+                }
+            }
+
+            List<Index.SearchResult>[] results = db.cudaBatchSearch(idxName, javaQueries, k);
+
+            for (int q = 0; q < numQueries; q++) {
+                List<Index.SearchResult> queryResults = results[q];
+                int count = queryResults.size();
+                for (int i = 0; i < k; i++) {
+                    long outId = -1;
+                    int outDist = Integer.MAX_VALUE;
+                    if (i < count) {
+                        Index.SearchResult r = queryResults.get(i);
+                        outId = r.id();
+                        outDist = r.score();
+                    }
+                    outIds.write(q * k + i, outId);
+                    outDistances.write(q * k + i, outDist);
+                }
+            }
+            return 0;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    @CEntryPoint(name = "vdb_cuda_query_planetary_grid")
+    public static long cudaQueryPlanetaryGrid(IsolateThread thread, CCharPointer indexName, CFloatPointer queries,
+            CIntPointer queryFamilies, CIntPointer queryThresholds, int numQueries,
+            CCharPointer votingMask) {
+        if (db == null) return -1;
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            Index index = db.getIndex(idxName);
+            if (index == null) return -2;
+
+            int dim = index.getDimension();
+            long totalTiles = index.size();
+
+            float[][] javaQueries = new float[numQueries][dim];
+            int[] javaFamilies = new int[numQueries];
+            int[] javaThresholds = new int[numQueries];
+
+            for (int q = 0; q < numQueries; q++) {
+                for (int j = 0; j < dim; j++) {
+                    javaQueries[q][j] = queries.read(q * dim + j);
+                }
+                javaFamilies[q] = queryFamilies.read(q);
+                javaThresholds[q] = queryThresholds.read(q);
+            }
+
+            long rawAddress = votingMask.rawValue();
+            MemorySegment maskSegment = MemorySegment.ofAddress(rawAddress).reinterpret(totalTiles);
+
+            return db.cudaQueryPlanetaryGrid(idxName, javaQueries, javaFamilies, javaThresholds, maskSegment);
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
 }

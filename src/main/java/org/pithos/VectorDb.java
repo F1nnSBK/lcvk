@@ -377,4 +377,42 @@ public class VectorDb {
             fp16Mapped.force();
         }
     }
+
+    // =========================================================================
+    // CUDA Acceleration Support
+    // =========================================================================
+
+    private boolean cudaEnabled = false;
+    private int cudaDeviceId = 0;
+
+    public int cudaInit(int deviceId) {
+        this.cudaDeviceId = deviceId;
+        this.cudaEnabled = true;
+        return CudaDeviceManager.initialize(deviceId);
+    }
+
+    public void cudaShutdown() {
+        CudaDeviceManager.shutdown();
+        this.cudaEnabled = false;
+    }
+
+    public boolean cudaIsAvailable() {
+        return cudaEnabled && CudaDeviceManager.isAvailable() != 0;
+    }
+
+    public List<Index.SearchResult>[] cudaBatchSearch(String indexName, float[][] queries, int k) {
+        Index index = getIndex(indexName);
+        if (index == null) {
+            throw new IllegalArgumentException("Index not found: " + indexName);
+        }
+        return index.cudaBatchSearch(queries, k);
+    }
+
+    public long cudaQueryPlanetaryGrid(String indexName, float[][] queries, int[] families, int[] thresholds, MemorySegment votingMask) {
+        Index index = getIndex(indexName);
+        if (index == null) {
+            throw new IllegalArgumentException("Index not found: " + indexName);
+        }
+        return index.cudaQueryPlanetaryGrid(queries, families, thresholds, votingMask);
+    }
 }
