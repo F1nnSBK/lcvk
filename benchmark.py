@@ -248,6 +248,28 @@ class PithosMIDB:
         self.lib.vdb_restore_delta.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
         self.lib.vdb_restore_delta.restype = ctypes.c_int
 
+        # CUDA API
+        self.lib.vdb_cuda_is_available.argtypes = [ctypes.c_void_p]
+        self.lib.vdb_cuda_is_available.restype = ctypes.c_int
+
+        self.lib.vdb_cuda_init.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.lib.vdb_cuda_init.restype = ctypes.c_int
+
+        self.lib.vdb_cuda_shutdown.argtypes = [ctypes.c_void_p]
+        self.lib.vdb_cuda_shutdown.restype = ctypes.c_int
+
+        self.lib.vdb_cuda_batch_search.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int,
+            ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p
+        ]
+        self.lib.vdb_cuda_batch_search.restype = ctypes.c_int
+
+        self.lib.vdb_cuda_query_planetary_grid.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p
+        ]
+        self.lib.vdb_cuda_query_planetary_grid.restype = ctypes.c_longlong
+
         # Instantiate isolate thread context with suppressed stderr for clean output
         with suppress_stderr():
             status = self.lib.graal_create_isolate(None, ctypes.byref(self.isolate), ctypes.byref(self.thread))
@@ -586,6 +608,100 @@ class PithosMIDB:
         c_path = restore_path.encode("utf-8")
         with suppress_stderr():
             return self.lib.vdb_restore_delta(self.thread, c_name, c_path, flush_threshold)
+
+    # =========================================================================
+    # CUDA Acceleration Methods
+    # =========================================================================
+
+    def cuda_is_available(self) -> bool:
+        """
+        Check if CUDA is available on this system.
+        
+        Returns:
+            bool: True if CUDA is available and initialized.
+        """
+        with suppress_stderr():
+            result = self.lib.vdb_cuda_is_available(self.thread)
+        return result != 0
+
+    def cuda_init(self, device_id: int = 0) -> int:
+        """
+        Initialize CUDA with the specified device.
+        
+        Args:
+            device_id (int): CUDA device ID to use (default: 0).
+            
+        Returns:
+            int: 0 on success, non-zero on failure.
+        """
+        with suppress_stderr():
+            return self.lib.vdb_cuda_init(self.thread, device_id)
+
+    def cuda_shutdown(self) -> int:
+        """
+        Shutdown CUDA and release resources.
+        
+        Returns:
+            int: 0 on success, non-zero on failure.
+        """
+        with suppress_stderr():
+            return self.lib.vdb_cuda_shutdown(self.thread)
+
+    def cuda_batch_search(self, index_name: str, queries: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Perform CUDA-accelerated batch KNN search.
+        
+        Args:
+            index_name (str): Registered index tag.
+            queries (np.ndarray): 2D float32 array of query vectors.
+            k (int): Number of nearest neighbors to retrieve.
+            
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: (IDs, distances) both shaped (num_queries, k).
+        """
+        num_queries = queries.shape[0]
+        out_ids = np.zeros(num_queries * k, dtype=np.int64)
+        out_dists = np.zeros(num_queries * k, dtype=np.int32)
+        
+        c_index_name = index_name.encode("utf-8")
+        query_ptr = queries.ctypes.data_as(ctypes.c_void_p)
+        ids_ptr = out_ids.ctypes.data_as(ctypes.c_void_p)
+        dists_ptr = out_dists.ctypes.data_as(ctypes.c_void_p)
+        
+        with suppress_stderr():
+            status = self.lib.vdb_cuda_batch_search(
+                self.thread, c_index_name, query_ptr, num_queries, k, ids_ptr, dists_ptr
+            )
+        if status != 0:
+            raise RuntimeError(f"CUDA batch search failed with code: {status}")
+            
+        return out_ids.reshape(num_queries, k), out_dists.reshape(num_queries, k)
+
+    def cuda_query_planetary_grid(self, index_name: str, queries: np.ndarray, families: np.ndarray, thresholds: np.ndarray, voting_mask: np.ndarray) -> int:
+        """
+        Perform CUDA-accelerated multi-family resonant voting query.
+        
+        Args:
+            index_name (str): Registered index tag.
+            queries (np.ndarray): 2D float32 array of queries.
+            families (np.ndarray): 1D array assigning a criteria family ID (0-7) to each query.
+            thresholds (np.ndarray): 1D array of Hamming bit distance cutoff thresholds.
+            voting_mask (np.ndarray): Pre-allocated 1D uint8 array to write matching masks.
+            
+        Returns:
+            int: The total count of matching resonant records.
+        """
+        c_index_name = index_name.encode("utf-8")
+        query_ptr = queries.ctypes.data_as(ctypes.c_void_p)
+        families_ptr = families.ctypes.data_as(ctypes.c_void_p)
+        thresholds_ptr = thresholds.ctypes.data_as(ctypes.c_void_p)
+        mask_ptr = voting_mask.ctypes.data_as(ctypes.c_void_p)
+        num_queries = queries.shape[0]
+        
+        with suppress_stderr():
+            return self.lib.vdb_cuda_query_planetary_grid(
+                self.thread, c_index_name, query_ptr, families_ptr, thresholds_ptr, num_queries, mask_ptr
+            )
 
     def close(self):
         """
