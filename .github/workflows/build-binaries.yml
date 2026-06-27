@@ -19,11 +19,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
         include:
           - os: ubuntu-latest
             artifact_name: pithos.so
             output_name: libpithos-linux-x86_64.so
+          - os: ubuntu-24.04-arm
+            artifact_name: pithos.so
+            output_name: libpithos-linux-aarch64.so
           - os: macos-latest
             artifact_name: pithos.dylib
             output_name: libpithos-macos-aarch64.dylib
@@ -54,7 +57,6 @@ jobs:
         run: |
           mkdir -p build-binaries
           cp target/${{ matrix.artifact_name }} build-binaries/${{ matrix.output_name }}
-          # Copy FFI C headers
           cp target/pithos.h build-binaries/
           cp target/graal_isolate.h build-binaries/
 
