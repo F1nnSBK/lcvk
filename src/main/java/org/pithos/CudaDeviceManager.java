@@ -1,13 +1,11 @@
 package org.pithos;
 
-import org.graalvm.nativeimage.c.CContext;
 import org.graalvm.nativeimage.c.function.CFunction;
 import org.graalvm.nativeimage.c.struct.CField;
 import org.graalvm.nativeimage.c.struct.CStruct;
 import org.graalvm.nativeimage.c.struct.SizeOf;
 import org.graalvm.word.PointerBase;
 
-@CContext(Directives.class)
 public class CudaDeviceManager {
 
     @CStruct("cudaDeviceProp")

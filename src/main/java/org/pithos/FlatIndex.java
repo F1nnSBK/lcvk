@@ -50,6 +50,8 @@ public class FlatIndex implements Index {
     private final int qMode;
     private final int[] tierLongs;
     private final int[] tierOffsets;
+    private final int[] tierSizes;
+    private final ByteBuffer[] tierVectors;
 
     private static final int SIMD_FLOAT_DIM_THRESHOLD = 32;
 
@@ -162,9 +164,14 @@ public class FlatIndex implements Index {
         }
 
         this.tierOffsets = new int[numTiers];
+        this.tierSizes = new int[numTiers];
+        this.tierVectors = new ByteBuffer[numTiers];
+        
         int offset = 0;
         for (int idx = 0; idx < numTiers; idx++) {
             this.tierOffsets[idx] = offset;
+            this.tierSizes[idx] = tiers[idx] - (idx == 0 ? 0 : tiers[idx - 1]);
+            this.tierVectors[idx] = tierSegments[idx].asByteBuffer();
             offset += this.tierLongs[idx];
         }
 
@@ -978,7 +985,7 @@ public class FlatIndex implements Index {
     private boolean cudaInitialized = false;
 
     private void ensureCudaInitialized() {
-        if (cudaInitialized || !CudaDeviceManager.isAvailable() != 0) {
+        if (cudaInitialized || CudaDeviceManager.isAvailable() == 0) {
             return;
         }
         deviceTierBuffers = new long[tierVectors.length];
@@ -1017,7 +1024,7 @@ public class FlatIndex implements Index {
 
         int status = pithos_cuda_launch_batch_hamming(
             deviceTierBuffers, deviceQueries, hostDistances,
-            (int) size, numQueries, tierVectors.length, tierOffsets, tierSizes
+            Math.toIntExact(size), numQueries, tierVectors.length, tierOffsets, tierSizes
         );
 
         if (status != 0) {
@@ -1027,15 +1034,15 @@ public class FlatIndex implements Index {
             return batchSearch(queries, k);
         }
 
-        ByteBuffer distanceBuffer = ByteBuffer.allocateDirect(numQueries * (int) size * 4);
+        ByteBuffer distanceBuffer = ByteBuffer.allocateDirect(numQueries * Math.toIntExact(size) * 4);
         long distanceBufferPtr = CudaMemoryManager.getDirectBufferAddress(distanceBuffer);
-        CudaMemoryManager.copyFromDevice(distanceBufferPtr, hostDistances, numQueries * (int) size * 4);
+        CudaMemoryManager.copyFromDevice(distanceBufferPtr, hostDistances, numQueries * Math.toIntExact(size) * 4);
 
         List<SearchResult>[] results = new List[numQueries];
         for (int q = 0; q < numQueries; q++) {
             List<SearchResult> queryResults = new ArrayList<>(k);
             for (int i = 0; i < size && i < k; i++) {
-                int distance = distanceBuffer.getInt(q * (int) size + i);
+                int distance = distanceBuffer.getInt(q * Math.toIntExact(size) + i);
                 queryResults.add(new SearchResult(i, distance));
             }
             results[q] = queryResults;
@@ -1099,7 +1106,7 @@ public class FlatIndex implements Index {
 
         int status = pithos_cuda_launch_voting(
             deviceTierBuffers, deviceQueries, deviceFamilies, deviceThresholds,
-            deviceVotingMask, (int) size, numQueries, numFamilies, numWordsPerVector
+            deviceVotingMask, Math.toIntExact(size), numQueries, numFamilies, numWordsPerVector
         );
 
         if (status != 0) {
@@ -1114,7 +1121,7 @@ public class FlatIndex implements Index {
             return queryPlanetaryGrid(queries, families, thresholds, votingMask);
         }
 
-        ByteBuffer votingBuffer = ByteBuffer.allocateDirect(size);
+        ByteBuffer votingBuffer = ByteBuffer.allocateDirect(Math.toIntExact(size));
         long votingBufferPtr = CudaMemoryManager.getDirectBufferAddress(votingBuffer);
         CudaMemoryManager.copyFromDevice(votingBufferPtr, deviceVotingMask, size);
 
