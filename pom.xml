@@ -104,9 +104,55 @@
                         <buildArg>-J-Xmx5g</buildArg>
                         <buildArg>-O3</buildArg>
                         <buildArg>-march=native</buildArg>
+                        <buildArg>-lcuda</buildArg>
+                        <buildArg>-lcudart</buildArg>
+                        <buildArg>-L/usr/local/cuda/lib64</buildArg>
                     </buildArgs>
                 </configuration>
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>cuda</id>
+            <activation>
+                <property>
+                    <name>cuda.enabled</name>
+                    <value>true</value>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.3.0</version>
+                        <executions>
+                            <execution>
+                                <id>compile-cuda-kernels</id>
+                                <phase>compile</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>nvcc</executable>
+                                    <workingDirectory>${project.basedir}/src/main/cuda</workingDirectory>
+                                    <arguments>
+                                        <argument>-c</argument>
+                                        <argument>pithos_kernels.cu</argument>
+                                        <argument>-o</argument>
+                                        <argument>${project.build.directory}/pithos_kernels.o</argument>
+                                        <argument>-O3</argument>
+                                        <argument>-arch=sm_80</argument>
+                                        <argument>-Xptxas=-v</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>
