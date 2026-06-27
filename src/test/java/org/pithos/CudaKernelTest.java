@@ -67,11 +67,13 @@ public class CudaKernelTest {
             long devicePtr = CudaMemoryManager.allocDevice(size);
             assertTrue(devicePtr != 0, "Device memory allocation failed");
             
-            int result = CudaMemoryManager.copyToDevice(devicePtr, hostBuffer, size);
+            long hostBufferPtr = CudaMemoryManager.getDirectBufferAddress(hostBuffer);
+            int result = CudaMemoryManager.copyToDevice(devicePtr, hostBufferPtr, size);
             assertEquals(0, result, "Memory transfer to device failed");
             
             ByteBuffer resultBuffer = ByteBuffer.allocateDirect(size);
-            result = CudaMemoryManager.copyFromDevice(resultBuffer, devicePtr, size);
+            long resultBufferPtr = CudaMemoryManager.getDirectBufferAddress(resultBuffer);
+            result = CudaMemoryManager.copyFromDevice(resultBufferPtr, devicePtr, size);
             assertEquals(0, result, "Memory transfer from device failed");
             
             resultBuffer.rewind();
