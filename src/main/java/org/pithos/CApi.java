@@ -1007,4 +1007,27 @@ public class CApi {
             return -4;
         }
     }
+
+    /**
+     * Compacts multiple compiled indexes into a single consolidated index.
+     *
+     * @param thread            the GraalVM isolate thread context
+     * @param sourcePathsJoined semicolon-separated list of source index paths
+     * @param targetPath        destination base path for consolidated index
+     * @return 0 on success, -5 on File I/O error, or -4 on internal exception
+     */
+    @CEntryPoint(name = "vdb_compact_indexes")
+    public static int compactIndexes(IsolateThread thread, CCharPointer sourcePathsJoined, CCharPointer targetPath) {
+        try {
+            String javaSourcePathsJoined = CTypeConversion.toJavaString(sourcePathsJoined);
+            String javaTargetPath = CTypeConversion.toJavaString(targetPath);
+            VectorDb.compactIndexes(javaSourcePathsJoined, javaTargetPath);
+            return 0;
+        } catch (IOException e) {
+            return -5;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
 }

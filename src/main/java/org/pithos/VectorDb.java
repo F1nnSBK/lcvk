@@ -1,10 +1,12 @@
 package org.pithos;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
@@ -16,12 +18,13 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class VectorDb {
     private final Map<String, Index> indices;
-    /** Per-index optional write buffers (LSM delta layer). */
     private final Map<String, DeltaBuffer> deltaBuffers;
+    private final Map<String, String> indexPaths;
 
     public VectorDb() {
         this.indices = new ConcurrentHashMap<>();
         this.deltaBuffers = new ConcurrentHashMap<>();
+        this.indexPaths = new ConcurrentHashMap<>();
     }
 
     /**
@@ -33,6 +36,7 @@ public class VectorDb {
         }
         Index index = FlatIndex.mapFile(basePath, weights, loraDim);
         indices.put(name, index);
+        indexPaths.put(name, basePath);
         return index;
     }
 
@@ -41,7 +45,11 @@ public class VectorDb {
     }
 
     public boolean dropIndex(String name) {
-        deltaBuffers.remove(name); // also drop associated delta buffer
+        DeltaBuffer buf = deltaBuffers.remove(name);
+        if (buf != null) {
+            buf.close();
+        }
+        indexPaths.remove(name);
         Index index = indices.remove(name);
         if (index != null) {
             try {
@@ -61,8 +69,12 @@ public class VectorDb {
                 // ignore
             }
         }
+        for (DeltaBuffer buf : deltaBuffers.values()) {
+            buf.close();
+        }
         indices.clear();
         deltaBuffers.clear();
+        indexPaths.clear();
     }
 
     // -------------------------------------------------------------------------
@@ -83,7 +95,9 @@ public class VectorDb {
         Index index = indices.get(indexName);
         if (index == null)
             throw new IllegalArgumentException("Unknown index: " + indexName);
-        DeltaBuffer buf = new DeltaBuffer(index.getDimension(), flushThreshold);
+        String basePath = indexPaths.get(indexName);
+        String walPath = (basePath != null) ? basePath + "_wal.bin" : null;
+        DeltaBuffer buf = new DeltaBuffer(index.getDimension(), flushThreshold, walPath);
         deltaBuffers.put(indexName, buf);
         return buf;
     }
@@ -414,5 +428,139 @@ public class VectorDb {
             throw new IllegalArgumentException("Index not found: " + indexName);
         }
         return index.cudaQueryPlanetaryGrid(queries, families, thresholds, votingMask);
+    }
+
+    public static void compactIndexes(String sourcePathsJoined, String targetPath) throws IOException {
+        String[] sourcePaths = sourcePathsJoined.split(";");
+        if (sourcePaths.length == 0) {
+            throw new IllegalArgumentException("No source paths specified for compaction");
+        }
+
+        Path firstHeaderPath = Path.of(sourcePaths[0]);
+        if (!Files.exists(firstHeaderPath)) {
+            throw new FileNotFoundException("Source index not found: " + sourcePaths[0]);
+        }
+
+        byte firstPlanetId;
+        long firstPlanetRadius;
+        int firstDimension;
+        int firstTiersCount;
+        int[] firstTiers;
+        byte firstQMode;
+
+        try (FileChannel channel = FileChannel.open(firstHeaderPath, StandardOpenOption.READ)) {
+            MemorySegment mapped = channel.map(FileChannel.MapMode.READ_ONLY, 0, 64, Arena.global());
+            if (mapped.get(ValueLayout.JAVA_BYTE, 0) != 'P' ||
+                mapped.get(ValueLayout.JAVA_BYTE, 1) != 'L' ||
+                mapped.get(ValueLayout.JAVA_BYTE, 2) != 'A' ||
+                mapped.get(ValueLayout.JAVA_BYTE, 3) != 'N') {
+                throw new IOException("Invalid Pithos index magic bytes in: " + sourcePaths[0]);
+            }
+            firstPlanetId = mapped.get(ValueLayout.JAVA_BYTE, 4);
+            firstPlanetRadius = mapped.get(ValueLayout.JAVA_LONG_UNALIGNED, 13);
+            firstDimension = mapped.get(ValueLayout.JAVA_INT_UNALIGNED, 21);
+            firstTiersCount = mapped.get(ValueLayout.JAVA_INT_UNALIGNED, 25);
+            firstTiers = new int[firstTiersCount];
+            for (int i = 0; i < firstTiersCount; i++) {
+                firstTiers[i] = mapped.get(ValueLayout.JAVA_INT_UNALIGNED, 29 + (i * 4));
+            }
+            firstQMode = mapped.get(ValueLayout.JAVA_BYTE, 61);
+        }
+
+        long combinedRecords = 0;
+        for (String sourcePathStr : sourcePaths) {
+            Path headerPath = Path.of(sourcePathStr);
+            if (!Files.exists(headerPath)) {
+                throw new FileNotFoundException("Source index not found: " + sourcePathStr);
+            }
+            try (FileChannel channel = FileChannel.open(headerPath, StandardOpenOption.READ)) {
+                MemorySegment mapped = channel.map(FileChannel.MapMode.READ_ONLY, 0, 64, Arena.global());
+                if (mapped.get(ValueLayout.JAVA_BYTE, 0) != 'P' ||
+                    mapped.get(ValueLayout.JAVA_BYTE, 1) != 'L' ||
+                    mapped.get(ValueLayout.JAVA_BYTE, 2) != 'A' ||
+                    mapped.get(ValueLayout.JAVA_BYTE, 3) != 'N') {
+                    throw new IOException("Invalid Pithos index magic bytes in: " + sourcePathStr);
+                }
+
+                byte pid = mapped.get(ValueLayout.JAVA_BYTE, 4);
+                long size = mapped.get(ValueLayout.JAVA_LONG_UNALIGNED, 5);
+                long radius = mapped.get(ValueLayout.JAVA_LONG_UNALIGNED, 13);
+                int dim = mapped.get(ValueLayout.JAVA_INT_UNALIGNED, 21);
+                int tiersCnt = mapped.get(ValueLayout.JAVA_INT_UNALIGNED, 25);
+                byte qm = mapped.get(ValueLayout.JAVA_BYTE, 61);
+
+                if (pid != firstPlanetId || radius != firstPlanetRadius || dim != firstDimension || tiersCnt != firstTiersCount || qm != firstQMode) {
+                    throw new IllegalArgumentException("Index schema mismatch for source: " + sourcePathStr);
+                }
+
+                for (int i = 0; i < tiersCnt; i++) {
+                    int t = mapped.get(ValueLayout.JAVA_INT_UNALIGNED, 29 + (i * 4));
+                    if (t != firstTiers[i]) {
+                        throw new IllegalArgumentException("Index tiers mismatch for source: " + sourcePathStr);
+                    }
+                }
+                combinedRecords += size;
+            }
+        }
+
+        Path targetHeaderPath = Path.of(targetPath);
+        Path parentDir = targetHeaderPath.getParent();
+        if (parentDir != null) {
+            Files.createDirectories(parentDir);
+        }
+
+        try (FileChannel channel = FileChannel.open(targetHeaderPath,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.WRITE,
+                StandardOpenOption.READ,
+                StandardOpenOption.TRUNCATE_EXISTING)) {
+            MemorySegment mapped = channel.map(FileChannel.MapMode.READ_WRITE, 0, 64, Arena.global());
+            mapped.set(ValueLayout.JAVA_BYTE, 0, (byte) 'P');
+            mapped.set(ValueLayout.JAVA_BYTE, 1, (byte) 'L');
+            mapped.set(ValueLayout.JAVA_BYTE, 2, (byte) 'A');
+            mapped.set(ValueLayout.JAVA_BYTE, 3, (byte) 'N');
+            mapped.set(ValueLayout.JAVA_BYTE, 4, firstPlanetId);
+            mapped.set(ValueLayout.JAVA_LONG_UNALIGNED, 5, combinedRecords);
+            mapped.set(ValueLayout.JAVA_LONG_UNALIGNED, 13, firstPlanetRadius);
+            mapped.set(ValueLayout.JAVA_INT_UNALIGNED, 21, firstDimension);
+            mapped.set(ValueLayout.JAVA_INT_UNALIGNED, 25, firstTiersCount);
+            for (int i = 0; i < firstTiersCount; i++) {
+                mapped.set(ValueLayout.JAVA_INT_UNALIGNED, 29 + (i * 4), firstTiers[i]);
+            }
+            mapped.set(ValueLayout.JAVA_BYTE, 61, firstQMode);
+            mapped.force();
+        }
+
+        mergeSidecarFiles(sourcePaths, targetPath, "_ids.bin");
+        mergeSidecarFiles(sourcePaths, targetPath, "_metadata.bin");
+        for (int k = 0; k < firstTiersCount; k++) {
+            mergeSidecarFiles(sourcePaths, targetPath, "_tier_" + k + ".bin");
+        }
+        
+        Path firstFp16Path = Path.of(sourcePaths[0] + "_fp16.bin");
+        if (Files.exists(firstFp16Path)) {
+            mergeSidecarFiles(sourcePaths, targetPath, "_fp16.bin");
+        }
+    }
+
+    private static void mergeSidecarFiles(String[] sourcePaths, String targetBasePath, String suffix) throws IOException {
+        Path targetPath = Path.of(targetBasePath + suffix);
+        try (FileChannel targetChannel = FileChannel.open(targetPath,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.WRITE,
+                StandardOpenOption.TRUNCATE_EXISTING)) {
+            for (String sourceBasePath : sourcePaths) {
+                Path sourcePath = Path.of(sourceBasePath + suffix);
+                if (Files.exists(sourcePath)) {
+                    try (FileChannel sourceChannel = FileChannel.open(sourcePath, StandardOpenOption.READ)) {
+                        long size = sourceChannel.size();
+                        long position = 0;
+                        while (position < size) {
+                            position += sourceChannel.transferTo(position, size - position, targetChannel);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

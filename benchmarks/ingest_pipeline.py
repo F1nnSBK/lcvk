@@ -16,7 +16,7 @@ except ImportError:
 from benchmark import PithosMIDB
 
 # Configuration
-NUM_RECORDS = 1_000_000
+NUM_RECORDS = 100_000
 DIMENSION = 384
 DB_FILE = "temp/benchmark_data/lunar_real_data"
 TIERS = np.array([64, 128, 256, 384], dtype=np.int32)

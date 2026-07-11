@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -166,5 +167,130 @@ class VectorDbTest {
         assertEquals(0, results.get(0).id()); // Closest should be ID 0
 
         db.close();
+    }
+
+    @Test
+    void testCompaction(@TempDir Path tempDir) throws IOException {
+        int D = 128;
+        int[] tiers = {64, 128};
+        TransformOperator transformer = new TransformOperator(D, tiers);
+
+        float[] vec0 = new float[D];
+        java.util.Arrays.fill(vec0, 0.5f);
+        float[] targetZ0 = transformer.preconditionAndRotate(vec0);
+        targetZ0[63] = 1.0f;
+        vec0 = transformer.backProject(targetZ0);
+
+        float[] vec1 = new float[D];
+        java.util.Arrays.fill(vec1, -0.5f);
+        float[] targetZ1 = transformer.preconditionAndRotate(vec1);
+        targetZ1[63] = 1.0f;
+        vec1 = transformer.backProject(targetZ1);
+
+        Path dbPath1 = tempDir.resolve("db1");
+        VectorDb.compileIndexFile(dbPath1.toString(), (byte) 1, 1000L, D, tiers, List.of(
+            new VectorRecord(0, vec0),
+            new VectorRecord(1, vec1)
+        ));
+
+        float[] vec2 = new float[D];
+        java.util.Arrays.fill(vec2, 0.2f);
+        float[] targetZ2 = transformer.preconditionAndRotate(vec2);
+        targetZ2[63] = 1.0f;
+        vec2 = transformer.backProject(targetZ2);
+
+        float[] vec3 = new float[D];
+        java.util.Arrays.fill(vec3, -0.2f);
+        float[] targetZ3 = transformer.preconditionAndRotate(vec3);
+        targetZ3[63] = 1.0f;
+        vec3 = transformer.backProject(targetZ3);
+
+        Path dbPath2 = tempDir.resolve("db2");
+        VectorDb.compileIndexFile(dbPath2.toString(), (byte) 1, 1000L, D, tiers, List.of(
+            new VectorRecord(2, vec2),
+            new VectorRecord(3, vec3)
+        ));
+
+        Path dbCompactedPath = tempDir.resolve("db_compacted");
+        String sourcePaths = dbPath1.toString() + ";" + dbPath2.toString();
+        VectorDb.compactIndexes(sourcePaths, dbCompactedPath.toString());
+
+        VectorDb db = new VectorDb();
+        Index index = db.loadIndex("compacted", dbCompactedPath.toString(), null, 0);
+
+        assertNotNull(index);
+        assertEquals(4, index.size());
+        assertEquals(D, index.getDimension());
+        assertEquals(2, index.getTierCount());
+
+        List<Index.SearchResult> results = index.search(vec0, 4);
+        assertEquals(4, results.size());
+        assertEquals(0, results.get(0).id());
+
+        db.close();
+    }
+
+    @Test
+    void testWalRecovery(@TempDir Path tempDir) throws IOException {
+        int D = 128;
+        int[] tiers = {64, 128};
+        TransformOperator transformer = new TransformOperator(D, tiers);
+
+        float[] vec0 = new float[D];
+        java.util.Arrays.fill(vec0, 0.5f);
+        float[] vec1 = new float[D];
+        java.util.Arrays.fill(vec1, -0.5f);
+
+        Path dbPath = tempDir.resolve("db_wal");
+        VectorDb.compileIndexFile(dbPath.toString(), (byte) 1, 1000L, D, tiers, List.of(
+            new VectorRecord(0, vec0),
+            new VectorRecord(1, vec1)
+        ));
+
+        // 1. Initialize and write to delta buffer (which writes to WAL)
+        VectorDb db = new VectorDb();
+        db.loadIndex("idx_wal", dbPath.toString(), null, 0);
+        DeltaBuffer delta = db.createDeltaBuffer("idx_wal", 100);
+
+        float[] insertVec0 = new float[D];
+        insertVec0[0] = 99.0f;
+        float[] insertVec1 = new float[D];
+        insertVec1[0] = 88.0f;
+        float[] insertVec2 = new float[D];
+        insertVec2[0] = 77.0f;
+
+        delta.insert(100, insertVec0);
+        delta.insert(200, insertVec1);
+        delta.insert(300, insertVec2);
+
+        // Delete one entry
+        delta.delete(200);
+
+        assertEquals(2, delta.liveSize());
+        assertEquals(3, delta.totalSize());
+
+        Path walFile = tempDir.resolve("db_wal_wal.bin");
+        assertTrue(Files.exists(walFile));
+        assertTrue(Files.size(walFile) > 0);
+
+        db.close(); // Closes delta and releases WAL file lock
+
+        // 2. Re-load index and verify WAL recovery
+        VectorDb db2 = new VectorDb();
+        db2.loadIndex("idx_wal", dbPath.toString(), null, 0);
+        DeltaBuffer delta2 = db2.createDeltaBuffer("idx_wal", 100);
+
+        assertEquals(2, delta2.liveSize());
+        assertEquals(3, delta2.totalSize());
+
+        // Drain the delta buffer (should truncate WAL)
+        List<VectorRecord> drained = delta2.drainLiveEntries();
+        assertEquals(2, drained.size());
+        assertEquals(0, delta2.liveSize());
+
+        // Verify WAL is truncated to size 0
+        assertEquals(0, Files.size(walFile));
+
+        db2.close();
     }
 }

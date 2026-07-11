@@ -3,8 +3,11 @@ package org.pithos;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -26,6 +29,8 @@ public class DeltaBuffer {
 
     private final int dimension;
     private final int flushThreshold;
+    private final String walPath;
+    private FileChannel walChannel;
 
     /** Ordered list of inserted entries (append-only, tombstones included). */
     private final List<BufferEntry> entries;
@@ -35,14 +40,30 @@ public class DeltaBuffer {
 
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
-    /**
-     * @param dimension      vector dimension (must match the base index)
-     * @param flushThreshold soft threshold for live-entry count above which flush is recommended
-     */
     public DeltaBuffer(int dimension, int flushThreshold) {
+        this(dimension, flushThreshold, null);
+    }
+
+    public DeltaBuffer(int dimension, int flushThreshold, String walPath) {
         this.dimension = dimension;
         this.flushThreshold = flushThreshold;
+        this.walPath = walPath;
         this.entries = new CopyOnWriteArrayList<>();
+        if (walPath != null) {
+            try {
+                Path path = Path.of(walPath);
+                boolean exists = Files.exists(path);
+                this.walChannel = FileChannel.open(path,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.WRITE,
+                        StandardOpenOption.READ);
+                if (exists && walChannel.size() > 0) {
+                    replayWal();
+                }
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to initialize WAL log: " + walPath, e);
+            }
+        }
     }
 
     /**
@@ -55,8 +76,13 @@ public class DeltaBuffer {
         }
         lock.writeLock().lock();
         try {
+            if (walChannel != null) {
+                writeInsertToWal(id, vector);
+            }
             entries.add(new BufferEntry(id, vector.clone(), false));
             liveCount.incrementAndGet();
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to write insert to WAL", e);
         } finally {
             lock.writeLock().unlock();
         }
@@ -79,7 +105,12 @@ public class DeltaBuffer {
                     found = true;
                 }
             }
+            if (found && walChannel != null) {
+                writeDeleteToWal(id);
+            }
             return found;
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to write delete to WAL", e);
         } finally {
             lock.writeLock().unlock();
         }
@@ -211,7 +242,92 @@ public class DeltaBuffer {
             }
             entries.clear();
             liveCount.set(0);
+            if (walChannel != null) {
+                try {
+                    walChannel.truncate(0);
+                    walChannel.force(false);
+                } catch (IOException e) {
+                    // Ignore truncation errors
+                }
+            }
             return result;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    private void replayWal() throws IOException {
+        long size = walChannel.size();
+        ByteBuffer buffer = ByteBuffer.allocate(9 + dimension * 4);
+        walChannel.position(0);
+        while (walChannel.position() < size) {
+            buffer.clear();
+            buffer.limit(9);
+            int read = walChannel.read(buffer);
+            if (read < 9) break;
+            buffer.flip();
+            byte type = buffer.get();
+            long id = buffer.getLong();
+
+            if (type == 1) {
+                buffer.clear();
+                buffer.limit(dimension * 4);
+                read = walChannel.read(buffer);
+                if (read < dimension * 4) break;
+                buffer.flip();
+                float[] vec = new float[dimension];
+                for (int d = 0; d < dimension; d++) {
+                    vec[d] = buffer.getFloat();
+                }
+                entries.add(new BufferEntry(id, vec, false));
+                liveCount.incrementAndGet();
+            } else if (type == 2) {
+                for (int i = 0; i < entries.size(); i++) {
+                    BufferEntry e = entries.get(i);
+                    if (e.id() == id && !e.tombstone()) {
+                        entries.set(i, new BufferEntry(e.id(), e.vector(), true));
+                        liveCount.decrementAndGet();
+                    }
+                }
+            }
+        }
+        walChannel.position(size);
+    }
+
+    private void writeInsertToWal(long id, float[] vector) throws IOException {
+        ByteBuffer bb = ByteBuffer.allocate(9 + dimension * 4);
+        bb.put((byte) 1);
+        bb.putLong(id);
+        for (float v : vector) {
+            bb.putFloat(v);
+        }
+        bb.flip();
+        while (bb.hasRemaining()) {
+            walChannel.write(bb);
+        }
+        walChannel.force(false);
+    }
+
+    private void writeDeleteToWal(long id) throws IOException {
+        ByteBuffer bb = ByteBuffer.allocate(9);
+        bb.put((byte) 2);
+        bb.putLong(id);
+        bb.flip();
+        while (bb.hasRemaining()) {
+            walChannel.write(bb);
+        }
+        walChannel.force(false);
+    }
+
+    public void close() {
+        lock.writeLock().lock();
+        try {
+            if (walChannel != null) {
+                walChannel.close();
+                walChannel = null;
+            }
+        } catch (IOException e) {
+            // Ignore
         } finally {
             lock.writeLock().unlock();
         }

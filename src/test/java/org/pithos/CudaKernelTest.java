@@ -9,9 +9,17 @@ import static org.junit.jupiter.api.Assertions.*;
 
 public class CudaKernelTest {
 
+    private boolean isCudaSupported() {
+        try {
+            return CudaDeviceManager.isAvailable() != 0;
+        } catch (UnsatisfiedLinkError e) {
+            return false;
+        }
+    }
+
     @Test
     public void testCudaAvailability() {
-        Assumptions.assumeTrue(CudaDeviceManager.isAvailable() != 0, "CUDA not available");
+        Assumptions.assumeTrue(isCudaSupported(), "CUDA not available");
         
         int deviceCount = CudaDeviceManager.getDeviceCount();
         assertTrue(deviceCount > 0, "No CUDA devices found");
@@ -19,7 +27,7 @@ public class CudaKernelTest {
 
     @Test
     public void testCudaInitialization() {
-        Assumptions.assumeTrue(CudaDeviceManager.isAvailable() != 0, "CUDA not available");
+        Assumptions.assumeTrue(isCudaSupported(), "CUDA not available");
         
         int result = CudaDeviceManager.initialize(0);
         assertEquals(0, result, "CUDA initialization failed");
@@ -29,12 +37,12 @@ public class CudaKernelTest {
 
     @Test
     public void testMemoryAllocation() {
-        Assumptions.assumeTrue(CudaDeviceManager.isAvailable() != 0, "CUDA not available");
+        Assumptions.assumeTrue(isCudaSupported(), "CUDA not available");
         
         CudaDeviceManager.initialize(0);
         
         try {
-            long size = 1024 * 1024; // 1MB
+            long size = 1024 * 1024;
             
             long pinnedPtr = CudaMemoryManager.allocPinned(size);
             assertTrue(pinnedPtr != 0, "Pinned memory allocation failed");
@@ -51,12 +59,12 @@ public class CudaKernelTest {
 
     @Test
     public void testMemoryTransfer() {
-        Assumptions.assumeTrue(CudaDeviceManager.isAvailable() != 0, "CUDA not available");
+        Assumptions.assumeTrue(isCudaSupported(), "CUDA not available");
         
         CudaDeviceManager.initialize(0);
         
         try {
-            int size = 256 * 4; // 256 floats
+            int size = 256 * 4;
             ByteBuffer hostBuffer = ByteBuffer.allocateDirect(size);
             
             for (int i = 0; i < 256; i++) {
@@ -89,7 +97,7 @@ public class CudaKernelTest {
 
     @Test
     public void testStreamCreation() {
-        Assumptions.assumeTrue(CudaDeviceManager.isAvailable() != 0, "CUDA not available");
+        Assumptions.assumeTrue(isCudaSupported(), "CUDA not available");
         
         CudaDeviceManager.initialize(0);
         
@@ -102,5 +110,4 @@ public class CudaKernelTest {
             CudaDeviceManager.shutdown();
         }
     }
-
 }

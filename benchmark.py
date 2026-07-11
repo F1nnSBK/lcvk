@@ -220,6 +220,11 @@ class PithosMIDB:
         self.lib.vdb_close.argtypes = [ctypes.c_void_p]
         self.lib.vdb_close.restype = ctypes.c_int
 
+        self.lib.vdb_compact_indexes.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p
+        ]
+        self.lib.vdb_compact_indexes.restype = ctypes.c_int
+
         # LSM delta buffer API
         self.lib.vdb_create_delta_buffer.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
         self.lib.vdb_create_delta_buffer.restype = ctypes.c_int
@@ -323,6 +328,16 @@ class PithosMIDB:
         vectors_ptr = vectors.ctypes.data_as(ctypes.c_void_p)
         with suppress_stderr():
             return self.lib.vdb_compile_index_file(self.thread, path_bytes, planet_id, planet_radius, dimension, tiers_ptr, len(tiers), ids_ptr, vectors_ptr, len(ids), q_mode)
+
+    def compact_indexes(self, source_paths: list, target_path: str) -> int:
+        """
+        Compacts multiple compiled indexes into a single consolidated index.
+        """
+        source_paths_joined = ";".join(source_paths)
+        c_sources = source_paths_joined.encode("utf-8")
+        c_target = target_path.encode("utf-8")
+        with suppress_stderr():
+            return self.lib.vdb_compact_indexes(self.thread, c_sources, c_target)
 
     def load_index(self, index_name: str, file_path: str, weights: np.ndarray = None, lora_dim: int = 0) -> int:
         """
