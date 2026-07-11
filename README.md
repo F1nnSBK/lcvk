@@ -24,10 +24,7 @@ To make the codebase easier to navigate, detailed guides and theory have been sp
 ```
 .
 ├── pom.xml                 # Maven configuration (dimension-agnostic pithos packaging, CUDA profile)
-├── Dockerfile              # Multi-stage compile environment with GraalVM JDK 25 and GCC
-├── Dockerfile.cuda        # CUDA-enabled build environment with NVIDIA CUDA Toolkit
 ├── README.md               # This file
-├── build.sh                # Docker build script (exports compiled Linux library)
 ├── run_benchmark.sh        # One-click benchmark (reproducible results)
 ├── reproduce_all.sh        # Reproduce all benchmarks and verification
 ├── test_client.c           # C verification client calling Pithos float C-API
@@ -126,11 +123,7 @@ export PATH=$JAVA_HOME/bin:$PATH
 
 ### 5. Building with CUDA Support (Linux)
 ```bash
-# Using Docker (recommended)
-docker build -t pithos-cuda -f Dockerfile.cuda .
-docker run --gpus all -it pithos-cuda
-
-# Or build manually on a CUDA-enabled system
+# Build manually on a CUDA-enabled system
 export JAVA_HOME=/path/to/graalvm
 export PATH=$JAVA_HOME/bin:$PATH
 export CUDA_HOME=/usr/local/cuda
