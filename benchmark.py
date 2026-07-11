@@ -204,6 +204,13 @@ class PithosMIDB:
         ]
         self.lib.vdb_compile_index_file.restype = ctypes.c_int
 
+        self.lib.vdb_compile_index_file_ext.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_byte, ctypes.c_longlong,
+            ctypes.c_int, ctypes.c_void_p, ctypes.c_int,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int
+        ]
+        self.lib.vdb_compile_index_file_ext.restype = ctypes.c_int
+
         self.lib.vdb_set_chunk_size.argtypes = [
             ctypes.c_void_p, ctypes.c_char_p, ctypes.c_longlong
         ]
@@ -302,7 +309,7 @@ class PithosMIDB:
         if status != 0:
             raise RuntimeError("Failed to initialize Pithos DB engine.")
 
-    def compile_index_file(self, file_path: str, planet_id: int, planet_radius: int, dimension: int, tiers: np.ndarray, ids: np.ndarray, vectors: np.ndarray, q_mode: int = 0) -> int:
+    def compile_index_file(self, file_path: str, planet_id: int, planet_radius: int, dimension: int, tiers: np.ndarray, ids: np.ndarray, vectors: np.ndarray, q_mode: int = 0, write_fp16: bool = True) -> int:
         """
         Compiles raw floating-point vectors into a multi-tier database file structure.
         
@@ -318,6 +325,7 @@ class PithosMIDB:
                                     0 = 1-bit sign-only (Default)
                                     1 = 2-bit ternary (active mask + signs)
                                     2 = float32 raw bypass (no quantization, CPU-SIMD scan)
+            write_fp16 (bool, optional): Whether to write dynamic FP16 sidecar for Stage 2 reranking.
                                     
         Returns:
             int: 0 on success, non-zero error code on failure.
@@ -326,8 +334,9 @@ class PithosMIDB:
         tiers_ptr = tiers.ctypes.data_as(ctypes.c_void_p)
         ids_ptr = ids.ctypes.data_as(ctypes.c_void_p)
         vectors_ptr = vectors.ctypes.data_as(ctypes.c_void_p)
+        write_fp16_val = 1 if write_fp16 else 0
         with suppress_stderr():
-            return self.lib.vdb_compile_index_file(self.thread, path_bytes, planet_id, planet_radius, dimension, tiers_ptr, len(tiers), ids_ptr, vectors_ptr, len(ids), q_mode)
+            return self.lib.vdb_compile_index_file_ext(self.thread, path_bytes, planet_id, planet_radius, dimension, tiers_ptr, len(tiers), ids_ptr, vectors_ptr, len(ids), q_mode, write_fp16_val)
 
     def compact_indexes(self, source_paths: list, target_path: str) -> int:
         """

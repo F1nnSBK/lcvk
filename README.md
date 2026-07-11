@@ -43,6 +43,7 @@ To make the codebase easier to navigate, detailed guides and theory have been sp
 │   ├── benchmark_baselines.py      # JIT loop and FAISS baseline comparison
 │   ├── verify_compaction.py        # Index compaction verification script
 │   ├── verify_wal.py               # Write-Ahead Log verification script
+│   ├── verify_optional_fp16.py     # FP16 vs. Non-FP16 verification script
 │   └── ...                         # Sweeps, candidate recall, and FFI benchmarks
 ├── examples/               # Developer integration demos
 │   ├── cpp/demo.c                  # C integration demo linking libpithos

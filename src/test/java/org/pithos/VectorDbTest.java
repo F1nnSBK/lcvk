@@ -293,4 +293,49 @@ class VectorDbTest {
 
         db2.close();
     }
+
+    @Test
+    void testOptionalFp16(@TempDir Path tempDir) throws IOException {
+        int D = 128;
+        int[] tiers = {64, 128};
+        TransformOperator transformer = new TransformOperator(D, tiers);
+
+        float[] vec0 = new float[D];
+        java.util.Arrays.fill(vec0, 0.5f);
+        float[] targetZ0 = transformer.preconditionAndRotate(vec0);
+        targetZ0[63] = 1.0f;
+        vec0 = transformer.backProject(targetZ0);
+
+        float[] vec1 = new float[D];
+        java.util.Arrays.fill(vec1, -0.5f);
+        float[] targetZ1 = transformer.preconditionAndRotate(vec1);
+        targetZ1[63] = 1.0f;
+        vec1 = transformer.backProject(targetZ1);
+
+        Path dbPath = tempDir.resolve("db_no_fp16");
+        
+        // Compile without writing FP16 sidecar
+        VectorDb.compileIndexFile(dbPath.toString(), (byte) 1, 1000L, D, tiers, List.of(
+            new VectorRecord(0, vec0),
+            new VectorRecord(1, vec1)
+        ), 0, false);
+
+        // Verify FP16 sidecar file does NOT exist
+        Path fp16Path = tempDir.resolve("db_no_fp16_fp16.bin");
+        assertFalse(Files.exists(fp16Path));
+
+        // Load index without FP16 sidecar
+        VectorDb db = new VectorDb();
+        Index index = db.loadIndex("no_fp16", dbPath.toString(), null, 0);
+
+        assertNotNull(index);
+        assertEquals(2, index.size());
+
+        // Perform search
+        List<Index.SearchResult> results = index.search(vec0, 2);
+        assertEquals(2, results.size());
+        assertEquals(0, results.get(0).id()); // Closest should still be ID 0 (asymmetric L2 fallback works!)
+
+        db.close();
+    }
 }
