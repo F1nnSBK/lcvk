@@ -411,6 +411,53 @@ public class CApi {
     }
 
     /**
+     * Compiles raw float records into a multi-tier database file layout with optional FP16 sidecar.
+     *
+     * @param thread            the GraalVM isolate thread context
+     * @param path              destination base path for compiled files
+     * @param planetId          planet ID code
+     * @param planetRadius      planet radius in meters
+     * @param dimension         vector dimensionality (D)
+     * @param tiers             cumulative search tier step boundaries array
+     * @param numTiers          total number of cumulative tiers (must be <= 8)
+     * @param ids               record identifier array
+     * @param vectors           contiguous query vector array
+     * @param numRecords        total number of vectors
+     * @param qMode             quantization mode (0=1-bit, 1=2-bit, 2=FP32)
+     * @param writeFp16         whether to write FP16 sidecar (1=true, 0=false)
+     * @return 0 on success, or -4 on internal exception
+     */
+    @CEntryPoint(name = "vdb_compile_index_file_ext")
+    public static int compileIndexFileExt(IsolateThread thread, CCharPointer path, byte planetId, long planetRadius,
+            int dimension, CIntPointer tiers, int numTiers,
+            CLongPointer ids, CFloatPointer vectors, int numRecords, int qMode, int writeFp16) {
+        try {
+            String filePath = CTypeConversion.toJavaString(path);
+
+            int[] javaTiers = new int[numTiers];
+            for (int i = 0; i < numTiers; i++) {
+                javaTiers[i] = tiers.read(i);
+            }
+
+            List<VectorRecord> records = new ArrayList<>(numRecords);
+            for (int i = 0; i < numRecords; i++) {
+                long id = ids.read(i);
+                float[] vector = new float[dimension];
+                for (int j = 0; j < dimension; j++) {
+                    vector[j] = vectors.read(i * dimension + j);
+                }
+                records.add(new VectorRecord(id, vector));
+            }
+
+            VectorDb.compileIndexFile(filePath, planetId, planetRadius, dimension, javaTiers, records, qMode, writeFp16 != 0);
+            return 0;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
      * Returns the total record count (N) for a loaded index.
      *
      * @param thread    the GraalVM isolate thread context
