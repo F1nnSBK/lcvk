@@ -144,7 +144,46 @@
                                             gcc -c "${project.basedir}/src/main/c/pithos_cuda_devicemanager.c" -o "${project.build.directory}/pithos_cuda_devicemanager.o" -I"${project.basedir}/src/main/c" -I"${project.basedir}/src/main/cuda" -I/usr/local/cuda/include -I"${env.JAVA_HOME}/include" -I"${env.JAVA_HOME}/include/linux" -fPIC -O3 &amp;&amp;
                                             gcc -c "${project.basedir}/src/main/c/pithos_cuda_memorymanager.c" -o "${project.build.directory}/pithos_cuda_memorymanager.o" -I"${project.basedir}/src/main/c" -I"${project.basedir}/src/main/cuda" -I/usr/local/cuda/include -I"${env.JAVA_HOME}/include" -I"${env.JAVA_HOME}/include/linux" -fPIC -O3 &amp;&amp;
                                             gcc -c "${project.basedir}/src/main/c/pithos_cuda_nativebindings.c" -o "${project.build.directory}/pithos_cuda_nativebindings.o" -I"${project.basedir}/src/main/c" -I"${project.basedir}/src/main/cuda" -I/usr/local/cuda/include -I"${env.JAVA_HOME}/include" -I"${env.JAVA_HOME}/include/linux" -fPIC -O3 &amp;&amp;
-                                            gcc -c "${project.basedir}/src/main/c/pithos_capi_cuda.c" -o "${project.build.directory}/pithos_capi_cuda.o" -I"${project.basedir}/src/main/c" -I"${project.basedir}/src/main/cuda" -I/usr/local/cuda/include -I"${env.JAVA_HOME}/include" -I"${env.JAVA_HOME}/include/linux" -fPIC -O3
+                                            gcc -c "${project.basedir}/src/main/c/pithos_capi_cuda.c" -o "${project.build.directory}/pithos_capi_cuda.o" -I"${project.basedir}/src/main/c" -I"${project.basedir}/src/main/cuda" -I/usr/local/cuda/include -I"${env.JAVA_HOME}/include" -I"${env.JAVA_HOME}/include/linux" -fPIC -O3 &amp;&amp;
+                                            cat &lt;&lt; 'EOF' &gt; "${project.build.directory}/gcc-wrapper.sh"
+#!/bin/bash
+echo "gcc-wrapper: calling with args: $@" &gt;&gt; "${project.build.directory}/gcc_wrapper.log"
+version_script_file=""
+for arg in "$@"; do
+    if [[ "$arg" == *"--version-script"* ]]; then
+        if [[ "$arg" == *","* ]]; then
+            version_script_file="${arg##*,}"
+        elif [[ "$arg" == *"="* ]]; then
+            version_script_file="${arg#*=}"
+        fi
+    fi
+done
+if [ -z "$version_script_file" ]; then
+    args_arr=("$@")
+    for ((i=0; i&lt;${#args_arr[@]}; i++)); do
+        if [[ "${args_arr[i]}" == "--version-script" ]]; then
+            version_script_file="${args_arr[i+1]}"
+            break
+        elif [[ "${args_arr[i]}" == "-Wl,--version-script" ]]; then
+            version_script_file="${args_arr[i+1]}"
+            break
+        fi
+    done
+fi
+echo "gcc-wrapper: found version script: $version_script_file" &gt;&gt; "${project.build.directory}/gcc_wrapper.log"
+if [ -n "$version_script_file" ] &amp;&amp; [ -f "$version_script_file" ]; then
+    echo "gcc-wrapper: modifying $version_script_file" &gt;&gt; "${project.build.directory}/gcc_wrapper.log"
+    echo "gcc-wrapper: content before:" &gt;&gt; "${project.build.directory}/gcc_wrapper.log"
+    cat "$version_script_file" &gt;&gt; "${project.build.directory}/gcc_wrapper.log"
+    if ! grep -q "Java_org_pithos_" "$version_script_file"; then
+        sed -i 's/global:/global:\n    Java_org_pithos_*;/g' "$version_script_file"
+    fi
+    echo "gcc-wrapper: content after:" &gt;&gt; "${project.build.directory}/gcc_wrapper.log"
+    cat "$version_script_file" &gt;&gt; "${project.build.directory}/gcc_wrapper.log"
+fi
+exec gcc "$@"
+EOF
+                                            chmod +x "${project.build.directory}/gcc-wrapper.sh"
                                         </argument>
                                     </arguments>
                                 </configuration>
@@ -168,6 +207,26 @@
                                 <buildArg>-J-Xmx5g</buildArg>
                                 <buildArg>-O3</buildArg>
                                 <buildArg>-march=native</buildArg>
+                                <buildArg>--native-compiler-path=${project.build.directory}/gcc-wrapper.sh</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaDeviceManager_initialize</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaDeviceManager_shutdown</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaDeviceManager_isAvailable</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaDeviceManager_getDeviceCount</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaDeviceManager_getDeviceProperties</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_allocDevice</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_allocPinned</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_copyFromDevice</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_copyFromDeviceAsync</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_copyToDevice</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_copyToDeviceAsync</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_createStream</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_destroyStream</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_freeDevice</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_freePinned</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_getDirectBufferAddress</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaMemoryManager_streamSynchronize</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaNativeBindings_pithos_1cuda_1launch_1batch_1hamming</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-Wl,-u,Java_org_pithos_CudaNativeBindings_pithos_1cuda_1launch_1voting</buildArg>
                                 <buildArg>-H:NativeLinkerOption=${project.build.directory}/pithos_kernels.o</buildArg>
                                 <buildArg>-H:NativeLinkerOption=${project.build.directory}/pithos_cuda_memory.o</buildArg>
                                 <buildArg>-H:NativeLinkerOption=${project.build.directory}/pithos_cuda.o</buildArg>
