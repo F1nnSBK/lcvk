@@ -66,16 +66,19 @@ FROM nvidia/cuda:12.5.1-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install runtime dependencies
+# Install runtime dependencies (gcc needed to compile test_client.c below)
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-numpy \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy the compiled shared library, headers, and CUDA library from builder
-COPY --from=builder /build/target/libpithos.so ./libpithos.so
+# Copy the compiled shared library, headers, and CUDA library from builder.
+# NOTE: native-image with imageName "pithos" produces "pithos.so" (no "lib" prefix),
+# so we rename it to "libpithos.so" here to match the -lpithos linker flag below.
+COPY --from=builder /build/target/pithos.so ./libpithos.so
 COPY --from=builder /build/target/pithos.h .
 COPY --from=builder /build/target/graal_isolate.h .
 COPY --from=builder /build/target/libpithos_cuda.a ./libpithos_cuda.a

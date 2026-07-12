@@ -81,7 +81,7 @@ jobs:
         run: |
           mkdir -p build-binaries
           docker create --name extractor pithos-cuda-builder
-          docker cp extractor:/build/target/libpithos.so build-binaries/libpithos-linux-cuda-x86_64.so
+          docker cp extractor:/build/target/pithos.so build-binaries/libpithos-linux-cuda-x86_64.so
           docker cp extractor:/build/target/pithos.h build-binaries/
           docker cp extractor:/build/target/graal_isolate.h build-binaries/
           docker rm extractor
