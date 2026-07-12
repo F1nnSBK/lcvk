@@ -50,7 +50,6 @@ int pithos_cuda_copy_from_device_async(void* dst, void* src, size_t size, void* 
 int pithos_cuda_stream_synchronize(void* stream);
 
 // Stream management
-int cuda_create_stream(void** stream);
 
 #ifdef __cplusplus
 }

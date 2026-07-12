@@ -1,4 +1,5 @@
 #include "pithos_cuda.h"
+#include <jni.h>
 
 // CUDA C-API functions called from Java CEntryPoint methods
 

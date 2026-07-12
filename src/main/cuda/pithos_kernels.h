@@ -8,7 +8,11 @@
 #define MAX_TIERS 8
 #define MAX_FAMILIES 8
 
-extern "C" int launch_batch_hamming_kernel(
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int launch_batch_hamming_kernel(
     const uint64_t* db_vectors,
     const uint64_t* query_vectors,
     int* distances,
@@ -20,7 +24,7 @@ extern "C" int launch_batch_hamming_kernel(
     cudaStream_t stream
 );
 
-extern "C" int launch_batch_hamming_optimized_kernel(
+int launch_batch_hamming_optimized_kernel(
     const uint64_t* db_vectors,
     const uint64_t* query_vectors,
     int* distances,
@@ -30,7 +34,7 @@ extern "C" int launch_batch_hamming_optimized_kernel(
     cudaStream_t stream
 );
 
-extern "C" int launch_multi_family_voting_kernel(
+int launch_multi_family_voting_kernel(
     const uint64_t* db_vectors,
     const uint64_t* query_vectors,
     const int* families,
@@ -43,7 +47,7 @@ extern "C" int launch_multi_family_voting_kernel(
     cudaStream_t stream
 );
 
-extern "C" int launch_walsh_hadamard_kernel(
+int launch_walsh_hadamard_kernel(
     float* input,
     float* output,
     int num_vectors,
@@ -51,19 +55,23 @@ extern "C" int launch_walsh_hadamard_kernel(
     cudaStream_t stream
 );
 
-extern "C" int cuda_alloc_pinned(void** ptr, size_t size);
-extern "C" int cuda_free_pinned(void* ptr);
-extern "C" int cuda_alloc_device(void** ptr, size_t size);
-extern "C" int cuda_free_device(void* ptr);
-extern "C" int cuda_copy_to_device_async(void* dst, void* src, size_t size, cudaStream_t stream);
-extern "C" int cuda_copy_from_device_async(void* dst, void* src, size_t size, cudaStream_t stream);
-extern "C" int cuda_stream_synchronize(cudaStream_t stream);
-extern "C" int cuda_create_stream(cudaStream_t* stream);
-extern "C" int cuda_destroy_stream(cudaStream_t stream);
-extern "C" int cuda_init_device(int deviceId);
-extern "C" int cuda_shutdown_device();
-extern "C" int cuda_is_available();
-extern "C" int cuda_get_device_count();
-extern "C" int cuda_get_device_properties(int deviceId, void* prop);
+int cuda_alloc_pinned(void** ptr, size_t size);
+int cuda_free_pinned(void* ptr);
+int cuda_alloc_device(void** ptr, size_t size);
+int cuda_free_device(void* ptr);
+int cuda_copy_to_device_async(void* dst, void* src, size_t size, cudaStream_t stream);
+int cuda_copy_from_device_async(void* dst, void* src, size_t size, cudaStream_t stream);
+int cuda_stream_synchronize(cudaStream_t stream);
+int cuda_create_stream(cudaStream_t* stream);
+int cuda_destroy_stream(cudaStream_t stream);
+int cuda_init_device(int deviceId);
+int cuda_shutdown_device();
+int cuda_is_available();
+int cuda_get_device_count();
+int cuda_get_device_properties(int deviceId, void* prop);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

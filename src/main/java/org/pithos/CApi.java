@@ -622,6 +622,86 @@ public class CApi {
     }
 
     /**
+     * Retrieves the raw off-heap virtual memory address and length of the metadata
+     * (validity/tombstone) column segment for a specific loaded index.
+     *
+     * @param thread     the GraalVM isolate thread context
+     * @param indexName  C string identifying the target loaded index
+     * @param outAddress output pointer populated with the virtual memory address of
+     *                   the metadata buffer
+     * @param outLength  output pointer populated with the byte size of the metadata
+     *                   buffer
+     * @return 0 on success, -1 if database not initialized, -2 if index not found,
+     *         or -6 if the index layout is unsupported
+     */
+    @CEntryPoint(name = "vdb_get_metadata_address")
+    public static int getMetadataAddress(IsolateThread thread, CCharPointer indexName,
+            CLongPointer outAddress, CLongPointer outLength) {
+        if (db == null) {
+            return -1;
+        }
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            Index index = db.getIndex(idxName);
+            if (index == null) {
+                return -2;
+            }
+            if (index instanceof FlatIndex) {
+                FlatIndex flatIdx = (FlatIndex) index;
+                long addr = flatIdx.getMetadataAddress();
+                long len = flatIdx.getMetadataByteSize();
+                outAddress.write(0, addr);
+                outLength.write(0, len);
+                return 0;
+            }
+            return -6; // Unsupported index type
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
+     * Retrieves the raw off-heap virtual memory address and length of the record ID
+     * mapping column segment for a specific loaded index.
+     *
+     * @param thread     the GraalVM isolate thread context
+     * @param indexName  C string identifying the target loaded index
+     * @param outAddress output pointer populated with the virtual memory address of
+     *                   the IDs buffer
+     * @param outLength  output pointer populated with the byte size of the IDs
+     *                   buffer
+     * @return 0 on success, -1 if database not initialized, -2 if index not found,
+     *         or -6 if the index layout is unsupported
+     */
+    @CEntryPoint(name = "vdb_get_ids_address")
+    public static int getIdsAddress(IsolateThread thread, CCharPointer indexName,
+            CLongPointer outAddress, CLongPointer outLength) {
+        if (db == null) {
+            return -1;
+        }
+        try {
+            String idxName = CTypeConversion.toJavaString(indexName);
+            Index index = db.getIndex(idxName);
+            if (index == null) {
+                return -2;
+            }
+            if (index instanceof FlatIndex) {
+                FlatIndex flatIdx = (FlatIndex) index;
+                long addr = flatIdx.getIdsAddress();
+                long len = flatIdx.getIdsByteSize();
+                outAddress.write(0, addr);
+                outLength.write(0, len);
+                return 0;
+            }
+            return -6; // Unsupported index type
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return -4;
+        }
+    }
+
+    /**
      * Binarizes a single float vector using the index's Rademacher signs
      * preconditioning and
      * Walsh-Hadamard Transform rotation block operators.

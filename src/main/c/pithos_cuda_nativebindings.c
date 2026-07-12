@@ -1,4 +1,5 @@
 #include "pithos_cuda.h"
+#include <jni.h>
 
 JNIEXPORT jint JNICALL Java_org_pithos_CudaNativeBindings_pithos_1cuda_1launch_1batch_1hamming(
     JNIEnv* env,

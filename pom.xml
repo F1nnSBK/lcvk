@@ -127,54 +127,25 @@
                         <version>3.3.0</version>
                         <executions>
                             <execution>
-                                <id>compile-cuda-kernels</id>
+                                <id>compile-cuda-and-c-sources</id>
                                 <phase>compile</phase>
                                 <goals>
                                     <goal>exec</goal>
                                 </goals>
                                 <configuration>
-                                    <executable>nvcc</executable>
-                                    <workingDirectory>${project.basedir}/src/main/cuda</workingDirectory>
+                                    <executable>sh</executable>
                                     <arguments>
                                         <argument>-c</argument>
-                                        <argument>pithos_kernels.cu</argument>
-                                        <argument>pithos_cuda_memory.cu</argument>
-                                        <argument>-o</argument>
-                                        <argument>${project.build.directory}/pithos_kernels.o</argument>
-                                        <argument>-O3</argument>
-                                        <argument>-arch=sm_80</argument>
-                                        <argument>-arch=sm_86</argument>
-                                        <argument>-arch=sm_89</argument>
-                                        <argument>-arch=sm_90</argument>
-                                        <argument>-Xptxas=-v</argument>
-                                        <argument>-I.</argument>
-                                        <argument>-I${project.basedir}/src/main/c</argument>
-                                    </arguments>
-                                </configuration>
-                            </execution>
-                            <execution>
-                                <id>compile-cuda-c-files</id>
-                                <phase>compile</phase>
-                                <goals>
-                                    <goal>exec</goal>
-                                </goals>
-                                <configuration>
-                                    <executable>gcc</executable>
-                                    <workingDirectory>${project.basedir}/src/main/c</workingDirectory>
-                                    <arguments>
-                                        <argument>-c</argument>
-                                        <argument>pithos_cuda.c</argument>
-                                        <argument>pithos_cuda_devicemanager.c</argument>
-                                        <argument>pithos_cuda_memorymanager.c</argument>
-                                        <argument>pithos_cuda_nativebindings.c</argument>
-                                        <argument>pithos_capi_cuda.c</argument>
-                                        <argument>-o</argument>
-                                        <argument>${project.build.directory}/pithos_cuda.o</argument>
-                                        <argument>-I.</argument>
-                                        <argument>-I${project.basedir}/src/main/cuda</argument>
-                                        <argument>-I/usr/local/cuda/include</argument>
-                                        <argument>-fPIC</argument>
-                                        <argument>-O3</argument>
+                                        <argument>
+                                            mkdir -p "${project.build.directory}" &amp;&amp;
+                                            nvcc -c "${project.basedir}/src/main/cuda/pithos_kernels.cu" -o "${project.build.directory}/pithos_kernels.o" -O3 -arch=sm_80 -arch=sm_86 -arch=sm_89 -arch=sm_90 -Xptxas=-v -I"${project.basedir}/src/main/cuda" -I"${project.basedir}/src/main/c" &amp;&amp;
+                                            nvcc -c "${project.basedir}/src/main/cuda/pithos_cuda_memory.cu" -o "${project.build.directory}/pithos_cuda_memory.o" -O3 -arch=sm_80 -arch=sm_86 -arch=sm_89 -arch=sm_90 -Xptxas=-v -I"${project.basedir}/src/main/cuda" -I"${project.basedir}/src/main/c" &amp;&amp;
+                                            gcc -c "${project.basedir}/src/main/c/pithos_cuda.c" -o "${project.build.directory}/pithos_cuda.o" -I"${project.basedir}/src/main/c" -I"${project.basedir}/src/main/cuda" -I/usr/local/cuda/include -I"${env.JAVA_HOME}/include" -I"${env.JAVA_HOME}/include/linux" -fPIC -O3 &amp;&amp;
+                                            gcc -c "${project.basedir}/src/main/c/pithos_cuda_devicemanager.c" -o "${project.build.directory}/pithos_cuda_devicemanager.o" -I"${project.basedir}/src/main/c" -I"${project.basedir}/src/main/cuda" -I/usr/local/cuda/include -I"${env.JAVA_HOME}/include" -I"${env.JAVA_HOME}/include/linux" -fPIC -O3 &amp;&amp;
+                                            gcc -c "${project.basedir}/src/main/c/pithos_cuda_memorymanager.c" -o "${project.build.directory}/pithos_cuda_memorymanager.o" -I"${project.basedir}/src/main/c" -I"${project.basedir}/src/main/cuda" -I/usr/local/cuda/include -I"${env.JAVA_HOME}/include" -I"${env.JAVA_HOME}/include/linux" -fPIC -O3 &amp;&amp;
+                                            gcc -c "${project.basedir}/src/main/c/pithos_cuda_nativebindings.c" -o "${project.build.directory}/pithos_cuda_nativebindings.o" -I"${project.basedir}/src/main/c" -I"${project.basedir}/src/main/cuda" -I/usr/local/cuda/include -I"${env.JAVA_HOME}/include" -I"${env.JAVA_HOME}/include/linux" -fPIC -O3 &amp;&amp;
+                                            gcc -c "${project.basedir}/src/main/c/pithos_capi_cuda.c" -o "${project.build.directory}/pithos_capi_cuda.o" -I"${project.basedir}/src/main/c" -I"${project.basedir}/src/main/cuda" -I/usr/local/cuda/include -I"${env.JAVA_HOME}/include" -I"${env.JAVA_HOME}/include/linux" -fPIC -O3
+                                        </argument>
                                     </arguments>
                                 </configuration>
                             </execution>
@@ -197,6 +168,13 @@
                                 <buildArg>-J-Xmx5g</buildArg>
                                 <buildArg>-O3</buildArg>
                                 <buildArg>-march=native</buildArg>
+                                <buildArg>-H:NativeLinkerOption=${project.build.directory}/pithos_kernels.o</buildArg>
+                                <buildArg>-H:NativeLinkerOption=${project.build.directory}/pithos_cuda_memory.o</buildArg>
+                                <buildArg>-H:NativeLinkerOption=${project.build.directory}/pithos_cuda.o</buildArg>
+                                <buildArg>-H:NativeLinkerOption=${project.build.directory}/pithos_cuda_devicemanager.o</buildArg>
+                                <buildArg>-H:NativeLinkerOption=${project.build.directory}/pithos_cuda_memorymanager.o</buildArg>
+                                <buildArg>-H:NativeLinkerOption=${project.build.directory}/pithos_cuda_nativebindings.o</buildArg>
+                                <buildArg>-H:NativeLinkerOption=${project.build.directory}/pithos_capi_cuda.o</buildArg>
                                 <buildArg>-H:NativeLinkerOption=-lcuda</buildArg>
                                 <buildArg>-H:NativeLinkerOption=-lcudart</buildArg>
                                 <buildArg>-H:NativeLinkerOption=-L/usr/local/cuda/lib64</buildArg>

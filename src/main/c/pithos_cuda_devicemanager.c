@@ -1,4 +1,5 @@
 #include "pithos_cuda.h"
+#include <jni.h>
 #include <string.h>
 
 JNIEXPORT jint JNICALL Java_org_pithos_CudaDeviceManager_initialize(

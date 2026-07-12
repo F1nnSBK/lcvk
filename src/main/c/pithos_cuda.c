@@ -2,6 +2,7 @@
 #include "../cuda/pithos_kernels.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 static cudaStream_t default_stream = 0;
 
@@ -113,12 +114,3 @@ int pithos_cuda_stream_synchronize(void* stream) {
     return cuda_stream_synchronize(*(cudaStream_t*)stream);
 }
 
-int cuda_create_stream(void** stream) {
-    cudaStream_t* s = (cudaStream_t*)malloc(sizeof(cudaStream_t));
-    if (cudaStreamCreate(s) != cudaSuccess) {
-        free(s);
-        return -1;
-    }
-    *stream = s;
-    return 0;
-}

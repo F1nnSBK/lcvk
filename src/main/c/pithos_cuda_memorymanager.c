@@ -1,5 +1,7 @@
 #include "pithos_cuda.h"
 #include <jni.h>
+#include <cuda_runtime.h>
+#include <stdlib.h>
 
 JNIEXPORT jlong JNICALL Java_org_pithos_CudaMemoryManager_allocPinned(
     JNIEnv* env, 

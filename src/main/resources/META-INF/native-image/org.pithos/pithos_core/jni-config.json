@@ -1,0 +1,44 @@
+[
+  {
+    "name": "org.pithos.CudaDeviceManager",
+    "allDeclaredFields": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "methods": [
+      { "name": "initialize", "parameterTypes": ["int"] },
+      { "name": "shutdown", "parameterTypes": [] },
+      { "name": "isAvailable", "parameterTypes": [] },
+      { "name": "getDeviceCount", "parameterTypes": [] }
+    ]
+  },
+  {
+    "name": "org.pithos.CudaMemoryManager",
+    "allDeclaredFields": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "methods": [
+      { "name": "allocPinned", "parameterTypes": ["long"] },
+      { "name": "freePinned", "parameterTypes": ["long"] },
+      { "name": "allocDevice", "parameterTypes": ["long"] },
+      { "name": "freeDevice", "parameterTypes": ["long"] },
+      { "name": "copyToDevice", "parameterTypes": ["long", "long", "long"] },
+      { "name": "copyFromDevice", "parameterTypes": ["long", "long", "long"] },
+      { "name": "createStream", "parameterTypes": [] },
+      { "name": "destroyStream", "parameterTypes": ["long"] },
+      { "name": "getDirectBufferAddress", "parameterTypes": ["java.nio.ByteBuffer"] },
+      { "name": "copyToDeviceAsync", "parameterTypes": ["long", "long", "long", "long"] },
+      { "name": "copyFromDeviceAsync", "parameterTypes": ["long", "long", "long", "long"] },
+      { "name": "streamSynchronize", "parameterTypes": ["long"] }
+    ]
+  },
+  {
+    "name": "org.pithos.CudaNativeBindings",
+    "allDeclaredFields": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "methods": [
+      { "name": "pithos_cuda_launch_batch_hamming", "parameterTypes": ["long[]", "long", "long", "int", "int", "int", "int[]", "int[]"] },
+      { "name": "pithos_cuda_launch_voting", "parameterTypes": ["long[]", "long", "long", "long", "long", "int", "int", "int", "int"] }
+    ]
+  }
+]
