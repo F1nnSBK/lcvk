@@ -197,9 +197,15 @@
                                 <buildArg>-J-Xmx5g</buildArg>
                                 <buildArg>-O3</buildArg>
                                 <buildArg>-march=native</buildArg>
-                                <buildArg>-lcuda</buildArg>
-                                <buildArg>-lcudart</buildArg>
-                                <buildArg>-L/usr/local/cuda/lib64</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-lcuda</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-lcudart</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-L/usr/local/cuda/lib64</buildArg>
+                                <!-- libcuda.so driver stub: path differs by architecture, so
+                                     both are listed. The linker silently ignores paths that
+                                     do not exist on the current build host. -->
+                                <buildArg>-H:NativeLinkerOption=-L/usr/local/cuda/lib64/stubs</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-L/usr/local/cuda-12.5/targets/sbsa-linux/lib/stubs</buildArg>
+                                <buildArg>-H:NativeLinkerOption=-L/usr/local/cuda-12.5/targets/x86_64-linux/lib/stubs</buildArg>
                             </buildArgs>
                         </configuration>
                     </plugin>

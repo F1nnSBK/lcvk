@@ -66,9 +66,35 @@ jobs:
           name: pithos-binaries-${{ matrix.os }}
           path: build-binaries/
 
+  build-cuda:
+    name: Build CUDA Shared Library (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Build CUDA Library in Docker
+        run: |
+          docker build -f Dockerfile.cuda --target builder -t pithos-cuda-builder .
+
+      - name: Extract Binaries from Docker
+        run: |
+          mkdir -p build-binaries
+          docker create --name extractor pithos-cuda-builder
+          docker cp extractor:/build/target/libpithos.so build-binaries/libpithos-linux-cuda-x86_64.so
+          docker cp extractor:/build/target/pithos.h build-binaries/
+          docker cp extractor:/build/target/graal_isolate.h build-binaries/
+          docker rm extractor
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pithos-binaries-cuda
+          path: build-binaries/
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, build-cuda]
     if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
